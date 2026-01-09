@@ -1,16 +1,14 @@
 """
-Pro Agent UI - Split-screen with Thought Stream and Visual Feed.
+Pro Agent UI - Split-screen with Thought Stream and Live Visual Feed.
 """
 import gradio as gr
 import base64
 import os
 import time
-import threading
 from agent import Agent
 from ollama_client import list_models
 from tools.vision import get_vision
 from tools.gamecontrol import get_gamecontrol
-from tools.neural_viz import get_visualizer
 
 
 class ProAgentUI:
@@ -20,11 +18,10 @@ class ProAgentUI:
         self.agent = Agent()
         self.vision = get_vision()
         self.game = get_gamecontrol()
-        self.neural_viz = get_visualizer()
         self.current_screenshot = None
         self.thought_log = []
         self.is_running = False
-        self.planning_mode = False  # Default to fast mode for less looping
+        self.planning_mode = False
         
     def add_thought(self, thought_type: str, content: str):
         """Add a thought to the log."""
@@ -41,9 +38,7 @@ class ProAgentUI:
         
         thought_line = f"[{timestamp}] {icon} {content}"
         self.thought_log.append(thought_line)
-        # Print to console for real-time visibility
-        print(thought_line)
-        # Keep only last 50 thoughts
+        print(thought_line)  # Console output
         if len(self.thought_log) > 50:
             self.thought_log = self.thought_log[-50:]
     
@@ -52,14 +47,19 @@ class ProAgentUI:
         return "\n".join(self.thought_log) if self.thought_log else "Waiting for input..."
     
     def capture_screenshot(self) -> str:
-        """Capture and return screenshot as base64."""
+        """Capture and save screenshot, return file path."""
         try:
-            img_path = "current_view.png"
-            self.vision.save_screenshot(img_path)
-            with open(img_path, "rb") as f:
-                return f"data:image/png;base64,{base64.b64encode(f.read()).decode()}"
+            # Use the correct method name from VisionTool
+            screenshot_b64 = self.vision.screenshot_to_base64()
+            if screenshot_b64:
+                # Save to file
+                filepath = os.path.join(os.path.dirname(__file__), "live_view.png")
+                with open(filepath, "wb") as f:
+                    f.write(base64.b64decode(screenshot_b64))
+                return filepath
         except Exception as e:
-            return None
+            print(f"Screenshot error: {e}")
+        return None
     
     def run_agent(self, message: str, history: list, model: str, planning_mode: bool):
         """Run the agent with the given message. Generator for live streaming."""
@@ -73,20 +73,17 @@ class ProAgentUI:
         
         self.planning_mode = planning_mode
         self.is_running = True
-        self.thought_log = []  # Clear for new task
+        self.thought_log = []
         
-        # Generate initial neural viz
-        self.neural_viz.update(message, "idle")
-        viz_path = self.neural_viz.save("neural_activity.png")
+        # Take initial screenshot of current state
+        screenshot_path = self.capture_screenshot()
         
         # Add initial thought
         mode_name = "PLANNING" if planning_mode else "FAST"
         self.add_thought("thinking", f"Mode: {mode_name} | Task: {message[:50]}...")
-        self.neural_viz.update(message, "thinking")
-        viz_path = self.neural_viz.save("neural_activity.png")
-        yield history, message, self.get_thought_stream(), viz_path
+        yield history, message, self.get_thought_stream(), screenshot_path
         
-        # If planning mode, just add a note (simpler, less looping)
+        # Build task prompt
         if planning_mode:
             task = f"Think step by step, then use ONE tool to complete: {message}"
             self.add_thought("plan", "Planning approach...")
@@ -94,9 +91,7 @@ class ProAgentUI:
             task = message
             self.add_thought("action", "Executing...")
         
-        self.neural_viz.update(task, "thinking")
-        viz_path = self.neural_viz.save("neural_activity.png")
-        yield history, "", self.get_thought_stream(), viz_path
+        yield history, "", self.get_thought_stream(), screenshot_path
         
         # Collect response
         full_response = ""
@@ -108,40 +103,42 @@ class ProAgentUI:
                     full_response = content
                     preview = content[:150].replace("\n", " ")
                     self.add_thought("thinking", preview + "...")
-                    self.neural_viz.update(content, "thinking")
-                    viz_path = self.neural_viz.save("neural_activity.png")
-                    yield history, "", self.get_thought_stream(), viz_path
+                    yield history, "", self.get_thought_stream(), screenshot_path
                     
                 elif update["type"] == "tool_call":
                     tool = update["tool"]
                     args = update["args"]
                     self.add_thought("tool", f"Calling: {tool}({args})")
-                    self.neural_viz.update(f"{tool} {args}", "tool_call")
-                    viz_path = self.neural_viz.save("neural_activity.png")
-                    yield history, "", self.get_thought_stream(), viz_path
+                    yield history, "", self.get_thought_stream(), screenshot_path
+                    
+                    # Take screenshot after visual tools
+                    if tool in ["browser_navigate", "browser_click", "browser_type", 
+                                "game_screenshot", "screenshot", "game_focus_window"]:
+                        time.sleep(0.5)
+                        screenshot_path = self.capture_screenshot() or screenshot_path
+                        yield history, "", self.get_thought_stream(), screenshot_path
                         
                 elif update["type"] == "tool_result":
                     result_preview = update["result"][:150].replace("\n", " ")
                     self.add_thought("result", result_preview + "...")
-                    self.neural_viz.update(update["result"], "result")
-                    viz_path = self.neural_viz.save("neural_activity.png")
-                    yield history, "", self.get_thought_stream(), viz_path
+                    # Take screenshot after tool completes
+                    screenshot_path = self.capture_screenshot() or screenshot_path
+                    yield history, "", self.get_thought_stream(), screenshot_path
                     
                 elif update["type"] == "complete":
                     full_response = update["final_response"]
                     self.add_thought("complete", "Task completed!")
-                    self.neural_viz.update("complete", "complete")
-                    viz_path = self.neural_viz.save("neural_activity.png")
-                    yield history, "", self.get_thought_stream(), viz_path
+                    screenshot_path = self.capture_screenshot() or screenshot_path
+                    yield history, "", self.get_thought_stream(), screenshot_path
                     
                 elif update["type"] == "max_iterations":
                     self.add_thought("error", "Max iterations reached")
-                    yield history, "", self.get_thought_stream(), viz_path
+                    yield history, "", self.get_thought_stream(), screenshot_path
                     
         except Exception as e:
             self.add_thought("error", f"Error: {str(e)}")
             full_response = f"Error: {str(e)}"
-            yield history, "", self.get_thought_stream(), viz_path
+            yield history, "", self.get_thought_stream(), screenshot_path
         
         self.is_running = False
         
@@ -149,7 +146,7 @@ class ProAgentUI:
         history.append({"role": "user", "content": message})
         history.append({"role": "assistant", "content": full_response})
         
-        yield history, "", self.get_thought_stream(), viz_path
+        yield history, "", self.get_thought_stream(), screenshot_path
     
     def clear_all(self):
         """Clear chat and thoughts."""
@@ -162,109 +159,127 @@ def create_pro_ui():
     """Create the Pro Gradio interface."""
     
     ui = ProAgentUI()
+    
     # Get available models
     try:
         models = list_models()
     except:
         models = ["nemotron-3-nano:latest"]
-    # Simpler CSS - static gradient background, white text
-    custom_css = """
-    /* Dark gradient background */
-    body, .gradio-container, .main, .contain, .app {
-        background: linear-gradient(180deg, #0a0a1a 0%, #0d2040 50%, #0a1a30 100%) !important;
-        min-height: 100vh;
-    }
     
-    .gradio-container {
-        max-width: 100% !important;
-    }
-    
-    /* Semi-transparent panels */
-    .block, .form, .panel {
-        background: rgba(10, 20, 40, 0.85) !important;
-        border: 1px solid rgba(100, 200, 255, 0.2) !important;
-        border-radius: 12px !important;
-    }
-    
-    /* CHAT - Green monospace like thought stream */
-    .chatbot, .chatbot * {
-        font-family: 'Consolas', 'Monaco', monospace !important;
-        color: #00ff88 !important;
-    }
-    
-    .chatbot .message {
-        background: rgba(10, 30, 50, 0.9) !important;
-        border-radius: 8px !important;
-        color: #00ff88 !important;
-        border: 1px solid rgba(0, 255, 136, 0.2) !important;
-    }
-    
-    .chatbot .user .message {
-        background: rgba(20, 50, 70, 0.9) !important;
-        border-left: 3px solid #00aaff !important;
-    }
-    
-    .chatbot .bot .message {
-        background: rgba(10, 40, 60, 0.9) !important;
-        border-left: 3px solid #00ff88 !important;
-    }
-    
-    /* Thought stream - green text */
-    .thought-stream, .thought-stream textarea {
-        font-family: 'Consolas', 'Monaco', monospace !important;
-        font-size: 12px !important;
-        background: rgba(10, 30, 50, 0.9) !important;
-        color: #00ff88 !important;
-        padding: 12px !important;
-        border-radius: 10px !important;
-        border: 1px solid rgba(0, 255, 136, 0.3) !important;
-    }
-    
-    /* Text colors */
-    h1, h2, h3, .markdown, p, span, label {
-        color: #ffffff !important;
-    }
-    
-    /* Dropdown/select - match background */
-    select, .dropdown, [data-testid="dropdown"] {
-        background: rgba(15, 35, 60, 0.9) !important;
-        color: #ffffff !important;
-        border: 1px solid rgba(100, 180, 255, 0.3) !important;
-        border-radius: 8px !important;
-    }
-    
-    /* Input fields */
-    textarea, input, .textbox {
-        background: rgba(15, 35, 60, 0.9) !important;
-        border: 1px solid rgba(100, 180, 255, 0.3) !important;
-        color: #ffffff !important;
-    }
-    
-    /* Buttons */
-    .primary, button.primary {
-        background: linear-gradient(135deg, #1a5a8a, #2a7aaa) !important;
-        color: #ffffff !important;
-        border: none !important;
-    }
-    
-    .primary:hover {
-        background: linear-gradient(135deg, #2a7aaa, #3a9aca) !important;
-    }
-    
-    /* Neural viz image styling */
-    .neural-viz img {
-        border: 2px solid rgba(100, 150, 255, 0.4) !important;
-        border-radius: 12px !important;
-    }
-    """
+    # Use Gradio's built-in dark theme
+    theme = gr.themes.Base(
+        primary_hue="cyan",
+        secondary_hue="blue",
+        neutral_hue="slate",
+    ).set(
+        body_background_fill="linear-gradient(180deg, #0a0a1a 0%, #0d2040 50%, #0a1a30 100%)",
+        body_background_fill_dark="linear-gradient(180deg, #0a0a1a 0%, #0d2040 50%, #0a1a30 100%)",
+        block_background_fill="rgba(10, 25, 50, 0.9)",
+        block_background_fill_dark="rgba(10, 25, 50, 0.9)",
+        input_background_fill="rgba(15, 35, 60, 0.95)",
+        input_background_fill_dark="rgba(15, 35, 60, 0.95)",
+        button_primary_background_fill="linear-gradient(135deg, #1a5a8a, #2a7aaa)",
+        button_primary_background_fill_dark="linear-gradient(135deg, #1a5a8a, #2a7aaa)",
+    )
     
     with gr.Blocks(title="Pro AI Agent") as demo:
-        # Inject CSS via HTML
-        gr.HTML(f"<style>{custom_css}</style>")
+        # Custom CSS for matrix green and orange colors - NO WHITE
+        gr.HTML("""
+        <style>
+        /* Remove all white backgrounds and borders */
+        *, *::before, *::after {
+            color: #00ff00 !important;
+            border-color: #00ff00 !important;
+        }
+        
+        /* Make all containers transparent */
+        .block, .form, .panel, .container, .wrap, .gradio-container,
+        .gr-box, .gr-form, .gr-panel, [class*="block"], [class*="container"] {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+        }
+        
+        /* Specific labeled elements - remove white box styling */
+        label, .label-wrap {
+            background: transparent !important;
+            border: none !important;
+            padding: 0 !important;
+        }
+        
+        /* Chat messages - dark green with green border */
+        .chatbot, .chatbot * {
+            color: #00ff00 !important;
+            font-family: 'Consolas', 'Monaco', monospace !important;
+            background: transparent !important;
+        }
+        
+        .message, [class*="message"] {
+            background: rgba(0, 30, 0, 0.6) !important;
+            border: 1px solid #00ff00 !important;
+            border-radius: 8px !important;
+        }
+        
+        /* Input areas - dark with green border */
+        textarea, input, .textbox, select {
+            background: rgba(0, 20, 0, 0.8) !important;
+            border: 1px solid #00ff00 !important;
+            color: #00ff00 !important;
+            font-family: 'Consolas', 'Monaco', monospace !important;
+        }
+        
+        /* Message input - orange text */
+        .gradio-textbox textarea, input[type="text"] {
+            color: #ff8c00 !important;
+        }
+        
+        /* Buttons - transparent with green border */
+        button, .button, .btn {
+            background: rgba(0, 50, 0, 0.5) !important;
+            border: 1px solid #00ff00 !important;
+            color: #00ff00 !important;
+        }
+        
+        button:hover {
+            background: rgba(0, 80, 0, 0.7) !important;
+        }
+        
+        /* Image container - remove white background */
+        .image-container, .upload-container, [class*="image"], img {
+            background: transparent !important;
+            border: 1px solid #00ff00 !important;
+        }
+        
+        /* Dropdown */
+        select, .dropdown, option {
+            background: rgba(0, 20, 0, 0.9) !important;
+            color: #00ff00 !important;
+        }
+        
+        /* Remove SVG/icon white fills */
+        svg, svg * {
+            fill: #00ff00 !important;
+            stroke: #00ff00 !important;
+        }
+        
+        /* Checkbox - make it very visible */
+        input[type="checkbox"] {
+            accent-color: #00ff00 !important;
+            width: 20px !important;
+            height: 20px !important;
+            border: 2px solid #00ff00 !important;
+            background: rgba(0, 50, 0, 0.8) !important;
+        }
+        
+        input[type="checkbox"]:checked {
+            background: #00ff00 !important;
+        }
+        </style>
+        """)
         
         gr.Markdown("""
         # 🚀 Pro AI Agent
-        **Neural Interface** | Live Thought Stream | Waterfall Visualization
+        **Neural Interface** | Live Thought Stream | Visual Feed
         """)
         
         with gr.Row():
@@ -288,7 +303,7 @@ def create_pro_ui():
                 with gr.Row():
                     planning_mode = gr.Checkbox(
                         label="🧠 Planning Mode",
-                        value=True,
+                        value=False,
                         info="Think before acting"
                     )
                     clear_btn = gr.Button("🗑️ Clear All")
@@ -304,20 +319,18 @@ def create_pro_ui():
                 thought_display = gr.Textbox(
                     label="",
                     value="Waiting for input...",
-                    lines=15,
-                    max_lines=20,
-                    interactive=False,
-                    elem_classes=["thought-stream"]
+                    lines=12,
+                    max_lines=15,
+                    interactive=False
                 )
             
-            # RIGHT COLUMN: Neural Activity Visualization
+            # RIGHT COLUMN: Live Visual Feed
             with gr.Column(scale=1):
-                gr.Markdown("### 🧬 Neural Activity")
+                gr.Markdown("### 👁️ Live Visual Feed")
                 visual_feed = gr.Image(
-                    label="Model thinking patterns",
+                    label="What the AI sees/controls",
                     type="filepath",
-                    height=500,
-                    elem_classes=["visual-feed"]
+                    height=500
                 )
                 
                 with gr.Row():
@@ -340,15 +353,7 @@ def create_pro_ui():
             return ui.clear_all()
         
         def on_refresh():
-            screenshot = ui.capture_screenshot()
-            if screenshot:
-                # Save to file for display
-                import base64
-                data = screenshot.split(",")[1]
-                with open("current_view.png", "wb") as f:
-                    f.write(base64.b64decode(data))
-                return "current_view.png"
-            return None
+            return ui.capture_screenshot()
         
         send_btn.click(
             on_send,
@@ -369,9 +374,10 @@ def create_pro_ui():
             outputs=[visual_feed]
         )
     
-    return demo
+    return demo, theme
 
 
 if __name__ == "__main__":
-    demo = create_pro_ui()
-    demo.launch(share=False, server_name="127.0.0.1", server_port=7860)
+    demo, theme = create_pro_ui()
+    demo.launch(share=False, server_name="127.0.0.1", server_port=7860, theme=theme)
+
