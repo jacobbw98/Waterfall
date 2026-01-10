@@ -63,54 +63,82 @@ class Agent:
             
             # Vision tools
             "screenshot": lambda: vision.save_screenshot("screenshot.png"),
+            
+            # Human interaction tools
+            "wait_for_human": lambda reason="": f"HUMAN_TAKEOVER_REQUESTED: {reason}",
         }
     
     def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
-        """Execute a tool and return the result."""
+        """Execute a tool and return the result, ignoring unexpected arguments."""
         if tool_name not in self.tools:
             return f"Error: Unknown tool '{tool_name}'"
         
         try:
+            import inspect
             tool_fn = self.tools[tool_name]
-            result = tool_fn(**args)
+            
+            # Intelligently filter arguments to match what the tool actually accepts
+            # This handles models hallucinating extra arguments (like 'url' for browser_get_content)
+            sig = inspect.signature(tool_fn)
+            params = sig.parameters
+            
+            # If the tool takes **kwargs, we can pass everything
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                filtered_args = args
+            else:
+                # Otherwise, only pass what's in the signature
+                filtered_args = {k: v for k, v in args.items() if k in params}
+                
+                # Check for positional-only arguments (rare in our lambdas but good to have)
+                # Our tools are mostly lambdas with keyword support, so this simplified filtering is usually enough
+            
+            result = tool_fn(**filtered_args)
             return str(result)
         except Exception as e:
             return f"Error executing {tool_name}: {e}"
     
     def parse_tool_call(self, response: str) -> Optional[Dict]:
-        """Extract tool call from response."""
-        # 1. Try to find ```tool_call ... ``` blocks
-        pattern = r"```tool_call\s*\n?(.*?)\n?```"
-        match = re.search(pattern, response, re.DOTALL)
+        """Extract tool call from response using XML tags or markdown fallback."""
+        # 1. Try to find <tool_call> ... </tool_call> blocks (Official NVIDIA protocol)
+        xml_pattern = r"<tool_call>\s*\n?(.*?)\n?</tool_call>"
+        xml_match = re.search(xml_pattern, response, re.DOTALL)
         
         json_content = None
-        if match:
-            json_content = match.group(1).strip()
+        if xml_match:
+            json_content = xml_match.group(1).strip()
         else:
-            # 2. Key fallback: Look for any JSON-like object if no code block found
-            # This helps if the model outputs raw JSON
-            json_pattern = r"\{.*\}"
-            json_match = re.search(json_pattern, response, re.DOTALL)
-            if json_match:
-                json_content = json_match.group(0).strip()
+            # 2. Markdown fallback: Try to find ```tool_call ... ``` blocks
+            md_pattern = r"```tool_call\s*\n?(.*?)\n?```"
+            md_match = re.search(md_pattern, response, re.DOTALL)
+            if md_match:
+                json_content = md_match.group(1).strip()
+            else:
+                # 3. Last resort: Look for any JSON-like object
+                json_pattern = r"\{.*\}"
+                json_match = re.search(json_pattern, response, re.DOTALL)
+                if json_match:
+                    json_content = json_match.group(0).strip()
 
         if json_content:
             try:
                 data = json.loads(json_content)
                 
-                # Case A: Our requested format {"tool": "name", "args": {}}
-                if "tool" in data:
-                    return data
+                # Normalize format: Support {"tool": "...", "args": {}} 
+                # AND NVIDIA/OpenAI style {"name": "...", "arguments": {}}
+                tool_name = data.get("tool") or data.get("name")
+                tool_args = data.get("args") or data.get("arguments") or {}
                 
-                # Case B: OpenAI style {"tool_calls": [{"name": "...", "arguments": {}}]}
-                # Some models default to this even if instructed otherwise
+                if tool_name:
+                    return {"tool": tool_name, "args": tool_args}
+                    
+                # Nested OpenAI style {"tool_calls": [...]}
                 if "tool_calls" in data and isinstance(data["tool_calls"], list):
                     call = data["tool_calls"][0]
-                    return {
-                        "tool": call.get("name") or call.get("function", {}).get("name"),
-                        "args": call.get("arguments") or call.get("function", {}).get("arguments") or {}
-                    }
-                    
+                    nested_name = call.get("name") or call.get("function", {}).get("name")
+                    nested_args = call.get("arguments") or call.get("function", {}).get("arguments") or {}
+                    if nested_name:
+                        return {"tool": nested_name, "args": nested_args}
+                        
             except json.JSONDecodeError:
                 pass
                 
@@ -121,41 +149,79 @@ class Agent:
         Run the agent loop for a task.
         Yields status updates for each step.
         """
-        self.client.reset_conversation()
+        from goal_tracker import GoalTracker
+        tracker = GoalTracker(task)
         
+        self.client.reset_conversation()
         yield {"type": "start", "task": task}
         
-        # Initial message to LLM
-        response = self.client.chat(task)
-        if self.verbose:
-            print(f"[DEBUG] Raw response: {response}")
-        yield {"type": "response", "content": response}
-        
+        # Initial model prompt
+        current_prompt = f"USER GOAL: {task}\n\nPlease begin by planning your approach."
         iteration = 0
+        last_tool_result = ""
+        last_tool_name = ""
+        
         while iteration < self.max_iterations:
-            # Check for tool call
+            # Get response from LLM
+            response = self.client.chat(current_prompt)
+            if self.verbose:
+                print(f"[DEBUG] Iteration {iteration} Raw: {response[:200]}...")
+            
+            # 1. Extract and yield thoughts (<think> tags)
+            think_match = re.search(r"<think>(.*?)</think>", response, re.DOTALL)
+            if think_match:
+                thought = think_match.group(1).strip()
+                if thought:
+                    yield {"type": "thought", "content": thought}
+            
+            # 2. Extract content outside of tags
+            clean_content = re.sub(r"<(think|tool_call)>.*?</\1>", "", response, flags=re.DOTALL).strip()
+            # Also clean markdown versions
+            clean_content = re.sub(r"```tool_call.*?```", "", clean_content, flags=re.DOTALL).strip()
+            
+            # 3. Check for tool call
             tool_call = self.parse_tool_call(response)
             
             if not tool_call:
-                # No tool call = task complete
-                yield {"type": "complete", "final_response": response}
+                # No tool call = task complete or needs user input
+                if clean_content:
+                    yield {"type": "response", "content": clean_content}
+                
+                final_text = clean_content
+                if not final_text:
+                    if last_tool_result:
+                        final_text = f"Goal achieved using {last_tool_name}. Final status:\n\n{last_tool_result[:1500]}"
+                    else:
+                        final_text = "Goal achieved. See the thought stream for details."
+                
+                yield {"type": "complete", "final_response": final_text}
                 break
             
-            # Execute tool
+            # 4. If there is content + a tool call, show the content as a response
+            if clean_content:
+                yield {"type": "response", "content": clean_content}
+            
+            # 5. Execute tool
             tool_name = tool_call.get("tool", "")
             tool_args = tool_call.get("args", {})
             
             yield {"type": "tool_call", "tool": tool_name, "args": tool_args}
             
             result = self.execute_tool(tool_name, tool_args)
+            tracker.add_action(tool_name, tool_args, result)
+            
+            last_tool_result = result
+            last_tool_name = tool_name
             yield {"type": "tool_result", "tool": tool_name, "result": result}
             
-            # Send result back to LLM
+            # 6. REFLECT: Feed result back and continue loop with a progress check
             self.client.add_tool_result(tool_name, result)
-            response = self.client.chat("Continue with the task based on the tool result.")
-            if self.verbose:
-                print(f"[DEBUG] Raw response: {response}")
-            yield {"type": "response", "content": response}
+            
+            # Check for looping behavior
+            if tracker.check_for_loop():
+                current_prompt = f"LOOP DETECTED: You have called {tool_name} with identical arguments multiple times. Please try a DIFFERENT approach or check if the goal is already met."
+            else:
+                current_prompt = tracker.get_reflection_prompt(result)
             
             iteration += 1
         

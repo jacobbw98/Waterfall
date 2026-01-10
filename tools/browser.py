@@ -91,6 +91,8 @@ class BrowserTool:
             self._ensure_browser()
             # Get text but limit length to avoid overwhelming LLM
             content = self._page.inner_text("body")
+            if not content or not content.strip():
+                return "The page loaded but has no visible text content. It might be an empty page, a canvas, or a loading screen."
             return content[:2000] + ("..." if len(content) > 2000 else "")
         except Exception as e:
             return f"Error getting content: {e}"
