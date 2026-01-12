@@ -311,7 +311,7 @@ def create_pro_ui():
     
     with gr.Blocks(title="Pro AI Agent") as demo:
         # Toggle UI Button
-        toggle_btn = gr.Button("👁️ Hide/Show UI", elem_id="toggle-ui-btn")
+        toggle_btn = gr.Button("Hide/Show UI", elem_id="toggle-ui-btn")
         
         toggle_js = """
         () => {
@@ -333,14 +333,13 @@ def create_pro_ui():
         # Wrap EVERYTHING (Title + Main UI) in container for toggling
         with gr.Column(elem_id="ui-container") as main_wrapper:
             gr.Markdown("""
-            # 🚀 Pro AI Agent
-            **Neural Interface** | Live Thought Stream | Visual Feed
+            <h1 style='text-align: center; margin-bottom: 0;'>Waterfall</h1>
             """)
             
             with gr.Row() as main_ui:
                 # LEFT COLUMN: Chat + Thoughts
                 with gr.Column(scale=1):
-                    gr.Markdown("### 💬 Chat")
+                    gr.Markdown("### Chat")
                     chatbot = gr.Chatbot(
                         label="Conversation",
                         height=300
@@ -357,12 +356,12 @@ def create_pro_ui():
                     
                     with gr.Row():
                         planning_mode = gr.Checkbox(
-                            label="🧠 Planning Mode",
+                            label="Planning Mode",
                             value=False,
                             info="Think before acting"
                         )
-                        continue_btn = gr.Button("▶️ Continue", variant="secondary")
-                        clear_btn = gr.Button("🗑️ Clear All")
+                        continue_btn = gr.Button("Continue", variant="secondary")
+                        clear_btn = gr.Button("Clear All")
                     
                     model_dropdown = gr.Dropdown(
                         choices=models,
@@ -371,7 +370,7 @@ def create_pro_ui():
                         interactive=True
                     )
                     
-                    gr.Markdown("### 🧠 Thought Stream")
+                    gr.Markdown("### Thought Stream")
                     thought_display = gr.Textbox(
                         label="",
                         value="Waiting for input...",
@@ -382,7 +381,7 @@ def create_pro_ui():
             
                 # RIGHT COLUMN: Live Visual Feed
                 with gr.Column(scale=1):
-                    gr.Markdown("### 👁️ Live Visual Feed")
+                    gr.Markdown("### Live Visual Feed")
                     visual_feed = gr.Image(
                         label="What the AI sees/controls",
                         type="filepath",
@@ -390,24 +389,17 @@ def create_pro_ui():
                     )
                     
                     with gr.Row():
-                        refresh_btn = gr.Button("📷 Capture Screen")
+                        refresh_btn = gr.Button("Capture Screen")
                     
-                    gr.Markdown("""
-                    ### Available Tools
-                    - 🌐 Browser: Navigate, click, type
-                    - 📁 Files: Read, write, search
-                    - 📝 Grading: Parse rubrics
-                    - 🎮 Game: Keys, mouse, windows
-                    - 📷 Screenshot: Capture screen
-                    """)
+                    # Available Tools block removed
                     
-                    gr.Markdown("### 🎵 Music")
+                    gr.Markdown("### Music")
                     audio_player = gr.Audio(
                         label="Music Player",
                         type="filepath",
                         autoplay=True
                     )
-                    next_btn = gr.Button("⏭️ Next Track")
+                    next_btn = gr.Button("Next Track")
                     now_playing = gr.Textbox(
                         label="Now Playing",
                         value="Click 'Next Track' to start",
