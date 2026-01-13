@@ -141,6 +141,31 @@ class Agent:
                         
             except json.JSONDecodeError:
                 pass
+        
+        # 4. NATURAL LANGUAGE EXTRACTION: Try to extract tool intent from plain English
+        # E.g. "use browser_navigate with url https://example.com"
+        nl_patterns = [
+            # browser_navigate patterns
+            (r"(?:use|call)\s+browser_navigate\s+(?:to|with\s+url\s+)?[\"']?(https?://[^\s\"']+)[\"']?",
+             lambda m: {"tool": "browser_navigate", "args": {"url": m.group(1)}}),
+            (r"navigate\s+to\s+[\"']?(https?://[^\s\"']+)[\"']?",
+             lambda m: {"tool": "browser_navigate", "args": {"url": m.group(1)}}),
+            (r"go\s+to\s+[\"']?(https?://[^\s\"']+)[\"']?",
+             lambda m: {"tool": "browser_navigate", "args": {"url": m.group(1)}}),
+            # browser_get_content
+            (r"(?:use|call)\s+browser_get_content",
+             lambda m: {"tool": "browser_get_content", "args": {}}),
+            (r"get\s+(?:page\s+)?content",
+             lambda m: {"tool": "browser_get_content", "args": {}}),
+            # screenshot
+            (r"(?:take|get|use)\s+screenshot",
+             lambda m: {"tool": "screenshot", "args": {}}),
+        ]
+        
+        for pattern, extractor in nl_patterns:
+            match = re.search(pattern, response, re.IGNORECASE)
+            if match:
+                return extractor(match)
                 
         return None
     
@@ -155,8 +180,8 @@ class Agent:
         self.client.reset_conversation()
         yield {"type": "start", "task": task}
         
-        # Initial model prompt
-        current_prompt = f"USER GOAL: {task}\n\nPlease begin by planning your approach."
+        # Initial model prompt - direct action, not planning
+        current_prompt = f"USER GOAL: {task}\n\nStart now. Call the first tool you need, or answer directly if no tools are required."
         iteration = 0
         last_tool_result = ""
         last_tool_name = ""
@@ -183,16 +208,96 @@ class Agent:
             tool_call = self.parse_tool_call(response)
             
             if not tool_call:
-                # No tool call = task complete or needs user input
+                # No tool call - but is this actually a final answer or an incomplete response?
+                
+                # DETECT INCOMPLETE RESPONSES: Model says it will do something but didn't include tool call
+                # Also detect meta-reasoning about format (model confused about HOW to respond)
+                incomplete_patterns = [
+                    r"(?:first|next|now)\s+(?:step|I\s+will|I'll|let me|I\s+need)",
+                    r"^(?:so\s+)?(?:first|let me|I will|I'll|I need to|I should|I'm going to)",
+                    r"plan(?:ning)?\s+(?:my\s+)?approach",
+                    r"(?:will|going to|need to)\s+(?:use|call|try|execute)\s+(?:the\s+)?(?:tool|browser|file)",
+                    r"^step\s+\d+:",
+                    r"my approach (?:is|will be)",
+                    # Meta-reasoning about format (model is confused)
+                    r"(?:THINK|THINKING)\s*(?:tag|with|using)",
+                    r"produce\s+(?:THINK|FINAL|response)",
+                    r"(?:inside|outside)\s+(?:the\s+)?(?:tag|think)",
+                    r"response\s+format",
+                    r"we\s+(?:can|should|need to)\s+(?:respond|output|produce)",
+                    r"per\s+instructions",
+                    # Natural language tool descriptions (model says what tool but doesn't call it)
+                    r"(?:use|call|try)\s+browser_",
+                    r"(?:use|call|try)\s+file_",
+                    r"(?:use|call|try)\s+game_",
+                    r"(?:use|call|try)\s+screenshot",
+                    r"we(?:'ll)?\s+need\s+to",
+                    r"likely\s+(?:we|I)\s+need",
+                    r"then\s+(?:maybe\s+)?browser_",
+                    r"fetch\s+content\s+first",
+                ]
+                
+                is_incomplete = False
+                if clean_content:
+                    for pattern in incomplete_patterns:
+                        if re.search(pattern, clean_content, re.IGNORECASE):
+                            is_incomplete = True
+                            break
+                
+                if is_incomplete:
+                    # Model intended to continue but didn't include a tool call
+                    # Prompt it to actually execute
+                    yield {"type": "thought", "content": f"(Model said: {clean_content})"}
+                    current_prompt = (
+                        "STOP PLANNING. Execute now.\n"
+                        "Example: <tool_call>{\"name\": \"browser_navigate\", \"arguments\": {\"url\": \"https://example.com\"}}</tool_call>\n"
+                        "Or just write your answer if no tool is needed."
+                    )
+                    iteration += 1
+                    continue
+                
+                # Check if the model put its FINAL ANSWER inside <think> tags
+                # This is a common pattern with Nemotron's native thinking mode
+                final_answer = None
+                if think_match:
+                    thought = think_match.group(1).strip()
+                    # Look for "FINAL ANSWER:" pattern in thinking
+                    final_patterns = [
+                        r"FINAL ANSWER[:\s]*(.+?)(?:$|\n\n)",
+                        r"Thus[,:\s]+(?:the )?(?:final )?(?:answer|response|result)[:\s]*(.+?)(?:$|\n\n)",
+                        r"(?:In conclusion|Therefore|To summarize)[,:\s]*(.+?)(?:$|\n\n)"
+                    ]
+                    for pattern in final_patterns:
+                        match = re.search(pattern, thought, re.IGNORECASE | re.DOTALL)
+                        if match:
+                            final_answer = match.group(1).strip()
+                            # Clean up any trailing protocol instructions
+                            final_answer = re.sub(r"\s*Use THINK to plan.*$", "", final_answer, flags=re.IGNORECASE)
+                            if len(final_answer) > 10:  # Only use if substantial
+                                break
+                            else:
+                                final_answer = None
+                
                 if clean_content:
                     yield {"type": "response", "content": clean_content}
                 
+                # Determine final text with priority: clean_content > extracted final_answer > tool result > fallback
                 final_text = clean_content
+                if not final_text and final_answer:
+                    final_text = final_answer
                 if not final_text:
                     if last_tool_result:
                         final_text = f"Goal achieved using {last_tool_name}. Final status:\n\n{last_tool_result[:1500]}"
                     else:
-                        final_text = "Goal achieved. See the thought stream for details."
+                        # Last resort: summarize from the thought if available
+                        if think_match:
+                            thought = think_match.group(1).strip()
+                            # Take the last substantial sentence as summary
+                            sentences = [s.strip() for s in thought.split('.') if len(s.strip()) > 20]
+                            if sentences:
+                                final_text = sentences[-1] + "."
+                        if not final_text:
+                            final_text = "Goal achieved. See the thought stream for details."
                 
                 yield {"type": "complete", "final_response": final_text}
                 break

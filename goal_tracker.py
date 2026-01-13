@@ -51,21 +51,12 @@ class GoalTracker:
 
     def get_reflection_prompt(self, last_result: str) -> str:
         """Create a prompt for the agent to reflect on its progress."""
-        history_summary = self.get_progress_summary()
-        
-        prompt = f"""### SELF-REFLECTION & PROGRESS CHECK
-**LAST TOOL RESULT**: {last_result[:2000]}
+        prompt = f"""TOOL RESULT: {last_result[:2000]}
 
-**HISTORY OF ACTIONS**:
-{history_summary}
+GOAL: {self.goal}
 
-**OBJECTIVE**: {self.goal}
-
-**YOUR TASK**:
-Review the objective and your history.
-1. Have you achieved the goal?
-2. If yes, provide the FINAL ANSWER.
-3. If no, what is the SINGLE next step to get closer to the goal? 
-Use a tool only if necessary. Avoid repeating failed actions.
+Is the goal complete? 
+- If YES: Write your final answer now.
+- If NO: Call the next tool immediately.
 """
         return prompt

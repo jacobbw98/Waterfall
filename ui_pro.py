@@ -501,7 +501,9 @@ if __name__ == "__main__":
             uniform vec2 u_zoom;
             uniform vec2 u_invZoom;  // 1/zoom computed in JS (float64) for deep zoom precision
             uniform float u_maxIter;
-            uniform vec3 u_rippleParams; // x=time, y=intensity, z=frequency (new)
+            // Multi-ripple system: up to 4 concurrent ripples
+            // Each vec4: x=timeSinceBirth, y=intensity, z=unused, w=unused
+            uniform vec4 u_ripples[4];
             out vec4 fragColor;
 
             // Double-single arithmetic for deep zoom precision
@@ -821,20 +823,44 @@ if __name__ == "__main__":
                         vec2 offset = (vec2(ax, ay) - 0.5 * (aa - 1.0)) / aa;
                         vec2 sampleCoord = gl_FragCoord.xy + offset;
                         
-                        // ===== RIPPLE DISTORTION =====
-                        if (u_rippleParams.y > 0.001) {
-                            vec2 center = u_resolution.xy * 0.5;
-                            vec2 toPixel = sampleCoord - center;
-                            float dist = length(toPixel);
-                            float distNorm = dist / u_resolution.y;
+                        // ===== MULTI-RIPPLE DISTORTION =====
+                        // Each ripple expands as a shockwave from center based on its birth time
+                        vec2 center = u_resolution.xy * 0.5;
+                        vec2 toPixel = sampleCoord - center;
+                        float dist = length(toPixel);
+                        float distNorm = dist / u_resolution.y;
+                        vec2 rippleDir = length(toPixel) > 0.001 ? normalize(toPixel) : vec2(0.0);
+                        
+                        float totalWaveDisplacement = 0.0;
+                        
+                        for (int i = 0; i < 4; i++) {
+                            float timeSinceBirth = u_ripples[i].x;
+                            float intensity = u_ripples[i].y;
                             
-                            // Expanding sine wave shockwave
-                            // Freq = 30.0, Speed = 20.0 (from u_rippleParams.x time)
-                            float wave = sin(distNorm * 30.0 - u_rippleParams.x * 20.0);
-                            
-                            // Apply distortion (intensity in y)
-                            sampleCoord += normalize(toPixel) * wave * u_rippleParams.y * u_resolution.y * 0.2;
+                            if (intensity > 0.001) {
+                                // Ripple expands outward from center over time
+                                // Wave front position = timeSinceBirth * expansionSpeed
+                                float expansionSpeed = 1.5;  // How fast the wavefront moves
+                                float waveRadius = timeSinceBirth * expansionSpeed;
+                                
+                                // Distance from this pixel to the wavefront
+                                float distFromWave = distNorm - waveRadius;
+                                
+                                // Gaussian envelope around the wavefront
+                                float waveWidth = 0.15;  // Width of the wave band
+                                float envelope = exp(-distFromWave * distFromWave / (waveWidth * waveWidth));
+                                
+                                // Oscillation within the wave
+                                float freq = 25.0;  // Wave frequency
+                                float wave = sin(distNorm * freq - timeSinceBirth * 18.0);
+                                
+                                // Combine: wave only visible near the expanding wavefront
+                                totalWaveDisplacement += wave * envelope * intensity;
+                            }
                         }
+                        
+                        // Apply combined ripple distortion
+                        sampleCoord += rippleDir * totalWaveDisplacement * u_resolution.y * 0.15;
                         
                         // Get main fractal data with orbit traps
                         OrbitData data = get_iter_full(sampleCoord);
@@ -1016,7 +1042,13 @@ if __name__ == "__main__":
             const locZoom = gl.getUniformLocation(program, "u_zoom");
             const locInvZoom = gl.getUniformLocation(program, "u_invZoom");
             const locMaxIter = gl.getUniformLocation(program, "u_maxIter");
-            const locRipple = gl.getUniformLocation(program, "u_rippleParams");
+            // Multi-ripple uniform locations
+            const locRipples = [
+                gl.getUniformLocation(program, "u_ripples[0]"),
+                gl.getUniformLocation(program, "u_ripples[1]"),
+                gl.getUniformLocation(program, "u_ripples[2]"),
+                gl.getUniformLocation(program, "u_ripples[3]")
+            ];
 
             const buffer = gl.createBuffer();
             gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -1082,11 +1114,17 @@ if __name__ == "__main__":
             let accumulatedTime = 0;
             let accumulatedZoomLog = 0;
 
-            // Ripple State
-            let rippleTimer = 0;
-            let rippleIntensity = 0;
+            // Ripple State - MULTI-RIPPLE SYSTEM
+            // Each beat spawns a new ripple wave with its own birth time
+            const MAX_RIPPLES = 6;  // Number of concurrent ripple waves
+            let ripples = [];  // Array of {birthTime, intensity, type} objects
             let lastBeatEnergy = 0;
             let avgBeatDelta = 0.01; // Adaptive threshold baseline
+            let globalAudioTime = 0;  // Cumulative audio-synced time
+            
+            // Sync Cleanup State
+            let activeSyncInterval = null;
+            let activeCleanupListeners = null;
 
             // ===== AUDIO SYNC SETUP =====
             let audioCtx, analyser, source;
@@ -1262,13 +1300,17 @@ if __name__ == "__main__":
                      }
                      
                      // Sync Interval (runs inside the closure)
-                     setInterval(() => {
+                     // CLEANUP OLD INTERVAL
+                     if (activeSyncInterval) clearInterval(activeSyncInterval);
+                     if (activeCleanupListeners) activeCleanupListeners();
+
+                     activeSyncInterval = setInterval(() => {
                         if (!element.paused) {
                             if (!bufferSource) playBuffer(element.currentTime);
                             else {
                                 // Drift Correction - TIGHTER SYNC
                                 const currentBufferTime = lastSyncTime + (audioCtx.currentTime - lastCtxTime);
-                                // If drift > 50ms, resync immediately
+                                // If drift > 0.05s, resync
                                 if (Math.abs(element.currentTime - currentBufferTime) > 0.05) {
                                     playBuffer(element.currentTime);
                                 }
@@ -1276,21 +1318,35 @@ if __name__ == "__main__":
                         } else {
                             if (bufferSource) stopBuffer();
                         }
-                     }, 100); // Check every 100ms (was 500ms) for tighter lock
+                     }, 100); 
                      
-                     element.addEventListener('seeking', () => { if(!element.paused) playBuffer(element.currentTime); });
-                     element.addEventListener('pause', stopBuffer);
-                     element.addEventListener('play', () => {
+                     // Event Handlers
+                     const onSeek = () => { if(!element.paused) playBuffer(element.currentTime); };
+                     const onPause = stopBuffer;
+                     const onPlay = () => {
                         playBuffer(element.currentTime);
                         // Reset stats here too just in case
                         avgBeatDelta = 0.01;
-                     });
-                     // CRITICAL: Reset on 'loadeddata' for automatic playlist transitions
-                     element.addEventListener('loadeddata', () => {
+                     };
+                     const onLoaded = () => {
                         avgBeatDelta = 0.01;
                         lastBeatEnergy = 0;
                         console.log("New Track Loaded - Ripple Stats Reset");
-                     });
+                     };
+
+                     element.addEventListener('seeking', onSeek);
+                     element.addEventListener('pause', onPause);
+                     element.addEventListener('play', onPlay);
+                     element.addEventListener('loadeddata', onLoaded);
+                     
+                     // Store cleanup function
+                     activeCleanupListeners = () => {
+                         element.removeEventListener('seeking', onSeek);
+                         element.removeEventListener('pause', onPause);
+                         element.removeEventListener('play', onPlay);
+                         element.removeEventListener('loadeddata', onLoaded);
+                         if (bufferSource) stopBuffer();
+                     };
                 }
             }
             
@@ -1349,30 +1405,42 @@ if __name__ == "__main__":
                     const dynamicThreshold = Math.max(0.005, avgBeatDelta * 1.5);
                     
                     if (beatDelta > dynamicThreshold && beatEnergy > 0.1) { 
-                         // PERCUSSION HIT!
-                         // Check what triggered it: Bass or Mid?
-                         if (bassEnergy > midEnergy) {
-                             rippleIntensity = 0.1;  // Bass Hit (Half of 0.2)
-                         } else {
-                             rippleIntensity = 0.05; // Mid Hit (Quarter of 0.2)
+                         // PERCUSSION HIT! Spawn a new ripple wave
+                         const rippleType = bassEnergy > midEnergy ? 'bass' : 'mid';
+                         const intensity = rippleType === 'bass' ? 0.12 : 0.06;
+                         
+                         // Add new ripple to pool
+                         ripples.push({
+                             birthTime: globalAudioTime,
+                             intensity: intensity,
+                             type: rippleType
+                         });
+                         
+                         // Keep pool size limited - remove oldest when full
+                         while (ripples.length > MAX_RIPPLES) {
+                             ripples.shift();
                          }
                     }
                     lastBeatEnergy = beatEnergy;
                     
-                    // Ripple physics
-                    rippleTimer += smoothedDelta;
+                    // Advance global audio time
+                    globalAudioTime += smoothedDelta;
                     
-                    // PERIODIC RESET to prevent float precision loss on long tracks
-                    // Shader uses: sin(dist * 30.0 - time * 20.0)
-                    // We need time * 20.0 to wrap around 2*PI
-                    // Period = 2*PI / 20.0
-                    const ripplePeriod = Math.PI * 2 / 20.0;
-                    if (rippleTimer > ripplePeriod) {
-                        rippleTimer -= ripplePeriod;
-                    }
+                    // NaN SAFETY GUARD
+                    if (isNaN(globalAudioTime)) globalAudioTime = 0;
+                    if (isNaN(avgBeatDelta)) avgBeatDelta = 0.01;
                     
-                    rippleIntensity *= 0.92; // Fast decay
-                    if (rippleIntensity < 0.01) rippleIntensity = 0;
+                    // Update ripple intensities with decay and remove dead ripples
+                    ripples = ripples.filter(r => {
+                        r.intensity *= 0.96;  // Slightly slower decay for sustained waves
+                        return r.intensity > 0.005;  // Remove when too faint
+                    });
+                    
+                    // AUDIO CONTEXT WATCHDOG
+                    // Ensure it didn't get suspended
+                     if (window.audioCtx && window.audioCtx.state === 'suspended') {
+                         window.audioCtx.resume();
+                     }
                     
                     // Apply effects
                     // Bass thumps the zoom - INSTANT response (no smoothing)
@@ -1675,7 +1743,18 @@ if __name__ == "__main__":
                 gl.uniform2fv(locZoom, splitDouble(zoom));
                 gl.uniform2fv(locInvZoom, splitDouble(1.0 / zoom));
                 gl.uniform1f(locMaxIter, gpuMaxIter);
-                gl.uniform3f(locRipple, rippleTimer, rippleIntensity, 0.0);
+                
+                // Populate ripple uniforms with top 4 ripples (sorted by intensity)
+                const sortedRipples = [...ripples].sort((a, b) => b.intensity - a.intensity).slice(0, 4);
+                for (let i = 0; i < 4; i++) {
+                    if (i < sortedRipples.length) {
+                        const r = sortedRipples[i];
+                        const timeSinceBirth = globalAudioTime - r.birthTime;
+                        gl.uniform4f(locRipples[i], timeSinceBirth, r.intensity, 0.0, 0.0);
+                    } else {
+                        gl.uniform4f(locRipples[i], 0.0, 0.0, 0.0, 0.0);  // Empty slot
+                    }
+                }
 
                 gl.drawArrays(gl.TRIANGLES, 0, 6);
                 requestAnimationFrame(render);

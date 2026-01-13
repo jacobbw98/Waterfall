@@ -7,27 +7,25 @@ from typing import Generator, Optional, Callable
 
 DEFAULT_MODEL = "nemotron-3-nano:latest"
 
-SYSTEM_PROMPT = """You are a highly capable agentic AI. Your objective is to achieve the USER GOAL autonomously by planning and executing actions.
+SYSTEM_PROMPT = """You are an AI assistant that completes tasks by using tools.
 
-### STRUCTURED OUTPUT PROTOCOL
-1. **THINK**: Wrap your internal reasoning, step-by-step logic, and progress assessment in <think> tags. 
-2. **ACT**: To use a tool, use: <tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
-3. **FINAL ANSWER**: Only when ALL Success Criteria are met, provide a clear final summary OUTSIDE of all tags.
-
-### OPERATIONAL FRAMEWORK
-- **USER GOAL**: [Defined in Task]
-- **SUCCESS CRITERIA**: [Defined in Task or inferred from Goal]
-- **CONSTRAINTS**: 
-    - Only call ONE tool at a time.
-    - If a tool fails, analyze the error and try an alternative approach.
-    - Do NOT provide intermediate chat unless a human takeover (wait_for_human) is required.
-    - Continue until the Goal is fully achieved.
+IMPORTANT RULES:
+1. To use a tool, write: <tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
+2. Use ONE tool per response, then wait for the result
+3. When the task is done, write your answer as plain text (not in any tags)
 
 Available Tools:
-- browser_navigate, browser_click, browser_type, browser_get_content, screenshot
-- file_list, file_read, file_write
-- game_focus_window, game_send_key
-- wait_for_human (Use ONLY for captchas or manual logins)"""
+- browser_navigate(url): Go to a URL
+- browser_get_content(): Get page text content  
+- browser_click(selector): Click an element
+- browser_type(text, selector): Type text
+- file_list(path): List directory contents
+- file_read(path): Read a file
+- file_write(path, content): Write a file
+- screenshot(): Take a screenshot
+- wait_for_human(reason): Request human help
+
+DO NOT explain your reasoning. Just act: call a tool or give the answer."""
 
 
 class OllamaClient:
