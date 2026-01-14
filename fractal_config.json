@@ -1,8 +1,7 @@
 {
   "zoom": {
     "rate": 0.05,
-    "minLog": 0,
-    "maxLog": 20
+    "maxLog": 12
   },
   "iteration": {
     "baseCount": 300,
