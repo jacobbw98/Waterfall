@@ -8,7 +8,9 @@ import time
 from agent import Agent
 from ollama_client import list_models, DEFAULT_MODEL
 from tools.vision import get_vision
+from tools.vision import get_vision
 from tools.gamecontrol import get_gamecontrol
+from fractal_engine import FractalEngine
 
 
 class ProAgentUI:
@@ -180,6 +182,32 @@ class ProAgentUI:
         self.agent.client.reset_conversation()
         self.thought_log = []
         return [], "", "Cleared. Ready for new task.", None
+
+
+# Global fractal engine for rebasing
+global_engine = None
+
+def generate_reference_orbit(cx_str: str, cy_str: str, max_iter: int = 10000) -> dict:
+    """Generate a new reference orbit at the given high-precision coordinates.
+    
+    This is called from JavaScript when we approach precision limits
+    to rebase the perturbation theory calculation.
+    """
+    global global_engine
+    if global_engine is None:
+        global_engine = FractalEngine()
+    
+    global_engine.set_view(cx_str, cy_str, "1.0")
+    global_engine.max_iter = max_iter
+    ref_data = global_engine.get_orbit_as_bytes()
+    
+    return {
+        "re": ref_data['re'],
+        "im": ref_data['im'], 
+        "count": ref_data['count'],
+        "cx": cx_str,
+        "cy": cy_str
+    }
 
 
 def create_pro_ui():
@@ -474,13 +502,18 @@ def create_pro_ui():
                 </div>
                 
                 <div class="settings-row">
-                    <label>Morph Intensity: <span id="morph-value" class="slider-value">1.0</span></label>
-                    <input type="range" id="morph-intensity" min="-10" max="10" step="0.5" value="1">
+                    <label>Morph Intensity: <span id="morph-value" class="slider-value">0.100</span></label>
+                    <input type="range" id="morph-intensity" min="-3" max="3" step="0.001" value="0.1">
                 </div>
                 
                 <div class="settings-row">
-                    <label>Ripple Intensity: <span id="ripple-value" class="slider-value">1.0</span></label>
-                    <input type="range" id="ripple-intensity" min="-10" max="10" step="0.5" value="1">
+                    <label>Water Distortion: <span id="ripple-value" class="slider-value">1.0</span></label>
+                    <input type="range" id="ripple-intensity" min="0" max="5" step="0.1" value="1">
+                </div>
+                
+                <div class="settings-row">
+                    <label>Color Pulse: <span id="pulse-value" class="slider-value">1.0</span></label>
+                    <input type="range" id="pulse-intensity" min="0" max="5" step="0.1" value="1">
                 </div>
                 
                 <div class="settings-row">
@@ -714,6 +747,33 @@ def create_pro_ui():
             inputs=[llm_system_prompt, llm_temperature, llm_context],
             outputs=[llm_settings_status]
         )
+        
+        # ===== REBASE API for True Infinite Zoom =====
+        # Hidden components that JavaScript can call to generate new reference orbits
+        with gr.Row(visible=False):
+            rebase_cx = gr.Textbox(elem_id="rebase-cx-input", value="")
+            rebase_cy = gr.Textbox(elem_id="rebase-cy-input", value="")
+            rebase_output = gr.JSON(elem_id="rebase-output")
+            rebase_trigger = gr.Button("Rebase", elem_id="rebase-trigger-btn")
+        
+        def handle_rebase(cx_str, cy_str):
+            """Handle rebase request from JavaScript."""
+            if not cx_str or not cy_str:
+                return {"error": "Missing coordinates"}
+            try:
+                result = generate_reference_orbit(cx_str, cy_str, max_iter=10000)
+                print(f"Rebase complete: {result['count']} points at ({cx_str[:20]}..., {cy_str[:20]}...)")
+                return result
+            except Exception as e:
+                print(f"Rebase error: {e}")
+                return {"error": str(e)}
+        
+        rebase_trigger.click(
+            handle_rebase,
+            inputs=[rebase_cx, rebase_cy],
+            outputs=[rebase_output]
+        )
+        
         # Autoplay first track on load
         demo.load(
             on_next_track,
@@ -724,57 +784,97 @@ def create_pro_ui():
 
 
 if __name__ == "__main__":
+    # Pre-calculate reference orbits for MULTIPLE Misiurewicz points (for morphing)
+    print("Generating Reference Orbits for Multiple Points...")
+    engine = FractalEngine()
+    engine.max_iter = 10000  # High iteration count for deep zoom support
+    
+    # Collection of interesting Misiurewicz points for morphing
+    MISIUREWICZ_POINTS = [
+        # Primary: Seahorse Valley spiral
+        ("-0.743643887037158704752191506114774", "0.131825904205311970493132056385139"),
+        # Secondary: Elephant Valley
+        ("0.281717921930775", "0.5771052841488505"),
+        # Tertiary: Double spiral
+        ("-0.1011", "0.9563"),
+    ]
+    
+    ref_orbits = []
+    for i, (cx, cy) in enumerate(MISIUREWICZ_POINTS):
+        print(f"  Generating orbit {i+1}/{len(MISIUREWICZ_POINTS)}: ({cx[:15]}..., {cy[:15]}...)")
+        engine.set_view(cx, cy, "1.0")
+        data = engine.get_orbit_as_bytes()
+        ref_orbits.append(data)
+        print(f"    -> {data['count']} points")
+    
+    print(f"All {len(ref_orbits)} orbits ready!")
+    
     demo, theme, css = create_pro_ui()
-    js = """
+    
+    # Inject all orbit data into JS
+    js = f"""
+    var REF_ORBITS = [
+        {{ re: "{ref_orbits[0]['re']}", im: "{ref_orbits[0]['im']}", count: {ref_orbits[0]['count']} }},
+        {{ re: "{ref_orbits[1]['re']}", im: "{ref_orbits[1]['im']}", count: {ref_orbits[1]['count']} }},
+        {{ re: "{ref_orbits[2]['re']}", im: "{ref_orbits[2]['im']}", count: {ref_orbits[2]['count']} }}
+    ];
+    var INITIAL_REF_ORBIT = REF_ORBITS[0];  // Use first as default
+    """ + """
     (function() {
         console.log("FRACTAL INITIALIZING...");
         const vertexShaderSource = `#version 300 es
             in vec2 a_position;
-            void main() { gl_Position = vec4(a_position, 0.0, 1.0); }
+            out vec2 v_uv;
+            void main() { 
+                v_uv = a_position;
+                gl_Position = vec4(a_position, 0.0, 1.0); 
+            }
         `;
 
         const glslFragmentCode = `#version 300 es
             precision highp float;
-            uniform vec2 u_resolution;
-            uniform float u_time;
-            uniform vec2 u_fixX_h;    // Center X (high + low parts)
-            uniform vec2 u_fixY_h;    // Center Y (high + low parts)
-            uniform vec2 u_zoom;
-            uniform vec2 u_invZoom;   // 1/zoom computed in JS with float64
-            uniform float u_maxIter;
-            uniform vec4 u_ripples[4];
+            
+            in vec2 v_uv;
             out vec4 fragColor;
 
-            // ===== DOUBLE-SINGLE ARITHMETIC =====
-            // Emulates ~48-bit mantissa for deep zoom precision
-            vec2 ds_add(vec2 d1, vec2 d2) {
-                float s = d1.x + d2.x;
-                float t = (s - d1.x) - d2.x;
-                float e = (d1.x - (s - t)) + (d2.x - t);
-                float low = (d1.y + d2.y) + e;
-                float high = s + low;
-                return vec2(high, low + (s - high));
+            // Uniforms
+            uniform vec2 u_resolution;
+            uniform vec2 u_zoom;        // Low precision zoom factor
+            uniform vec2 u_deltaC;      // Low precision offset from Reference
+            uniform int u_maxIter;
+            uniform float u_time;
+            
+            // Reference Orbit Textures (High Precision Skeleton) - PRIMARY
+            uniform sampler2D u_refOrbitRe; // Real part of Z_n
+            uniform sampler2D u_refOrbitIm; // Imag part of Z_n
+            uniform int u_refCount;         // Number of points in reference
+            
+            // Reference Orbit Textures - SECONDARY (for blending/morphing)
+            uniform sampler2D u_refOrbitRe2;
+            uniform sampler2D u_refOrbitIm2;
+            uniform int u_refCount2;
+            uniform float u_morphBlend;      // 0-1 blend between primary and secondary orbits
+            
+            // Audio Ripples
+            uniform vec4 u_ripples[4];
+            
+            // Transition brightness (for seamless zoom loop fade)
+            uniform float u_brightness;
+            
+            // Morph intensity (controls fractal structure evolution)
+            uniform float u_morphIntensity;
+            
+            // Complex Math Helpers
+            vec2 cmul(vec2 a, vec2 b) {
+                return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x);
             }
-
-            vec2 ds_sub(vec2 d1, vec2 d2) {
-                return ds_add(d1, vec2(-d2.x, -d2.y));
+            
+            vec2 csqr(vec2 a) {
+                return vec2(a.x*a.x - a.y*a.y, 2.0*a.x*a.y);
             }
-
-            vec2 ds_mul(vec2 d1, vec2 d2) {
-                const float split = 4097.0;
-                float c1 = d1.x * split;
-                float h1 = c1 - (c1 - d1.x);
-                float l1 = d1.x - h1;
-                float c2 = d2.x * split;
-                float h2 = c2 - (c2 - d2.x);
-                float l2 = d2.x - h2;
-                float p = d1.x * d2.x;
-                float e = ((h1 * h2 - p) + h1 * l2 + l1 * h2) + l1 * l2;
-                float s = p + (e + d1.x * d2.y + d1.y * d2.x);
-                return vec2(s, (p - s) + (e + d1.x * d2.y + d1.y * d2.x));
-            }
-
+            
             vec3 palette(float t) {
+                // Original "Cyberpunk" palette
                 vec3 a = vec3(0.02, 0.01, 0.08);   
                 vec3 b = vec3(0.15, 0.8, 1.0);   
                 vec3 c = vec3(1.0, 1.0, 1.0);
@@ -783,99 +883,158 @@ if __name__ == "__main__":
             }
 
             void main() {
-                vec2 uv = (gl_FragCoord.xy * 2.0 - u_resolution.xy) / u_resolution.y;
+                // 1. Calculate pixel's low-precision offset (delta_c) from center
+                // v_uv is already [-1, 1] from Vertex Shader
+                vec2 uv = v_uv;  
+                uv.x *= u_resolution.x / u_resolution.y; 
                 
-                // Use high-precision offset calculation
-                vec2 offset_x = ds_mul(vec2(uv.x, 0.0), u_invZoom);
-                vec2 offset_y = ds_mul(vec2(uv.y, 0.0), u_invZoom);
+                // ===== WATER RIPPLE DISTORTION =====
+                // Apply ripple distortion to UV coordinates before fractal calculation
+                // Creates water-like wave effect emanating from center
+                float dist = length(uv);  // Distance from center
+                vec2 distortedUV = uv;
                 
-                // c = center + offset
-                vec2 cx = ds_add(u_fixX_h, offset_x);
-                vec2 cy = ds_add(u_fixY_h, offset_y);
-                
-                // ===== RESCALING FOR DEEP ZOOM =====
-                // When values get too small, rescale to prevent underflow
-                const float RESCALE_LOW = 1e-6;    // Rescale when below this
-                const float RESCALE_HIGH = 1e6;    // Rescale when above this
-                const float RESCALE_FACTOR = 1e6;  // Factor to rescale by
-                
-                // z starts at 0 for Mandelbrot
-                vec2 zx = vec2(0.0);
-                vec2 zy = vec2(0.0);
-                float scaleFactor = 1.0;  // Cumulative scale
-                
-                float max_iter = u_maxIter;
-                float smooth_iter = 0.0;
-                float iter = 0.0;
-                
-                for (float i = 0.0; i < 2000.0; i++) {
-                    if (i >= max_iter) break;
-                    
-                    // z = z^2 + c using double-single arithmetic
-                    vec2 zx2 = ds_mul(zx, zx);
-                    vec2 zy2 = ds_mul(zy, zy);
-                    vec2 zxy = ds_mul(zx, zy);
-                    
-                    // Escape check using actual magnitude (with scale)
-                    float mag2 = (zx2.x + zy2.x) * scaleFactor * scaleFactor;
-                    if (mag2 > 256.0) {
-                        float log_zn = log(mag2) / 2.0;
-                        float nu = log(log_zn / log(2.0)) / log(2.0);
-                        smooth_iter = i + 1.0 - nu;
-                        break;
+                for (int r = 0; r < 4; r++) {
+                    vec4 ripple = u_ripples[r];
+                    if (ripple.y > 0.001) {
+                        // ripple.x = time since birth, ripple.y = intensity
+                        float rippleSpeed = 2.0;
+                        float rippleWidth = 0.3;
+                        float ripplePhase = ripple.x * rippleSpeed;
+                        
+                        // Calculate ripple ring position and strength
+                        float rippleDist = mod(ripplePhase, 3.0);  // Ripple expands outward
+                        float ringStrength = exp(-abs(dist - rippleDist) / rippleWidth);
+                        
+                        // Apply displacement perpendicular to ripple direction
+                        float displacement = sin(dist * 20.0 - ripplePhase * 8.0) * ringStrength * ripple.y * 0.02;
+                        vec2 dir = normalize(uv + 0.001);  // Direction from center
+                        distortedUV += dir * displacement;
                     }
-                    
-                    // new_zx = zx^2 - zy^2 + cx
-                    // new_zy = 2*zx*zy + cy
-                    vec2 new_zx = ds_add(ds_sub(zx2, zy2), cx);
-                    vec2 new_zy = ds_add(ds_add(zxy, zxy), cy);
-                    
-                    // RESCALING: If values get too small, rescale up
-                    float newMag = abs(new_zx.x) + abs(new_zy.x);
-                    if (newMag < RESCALE_LOW && newMag > 0.0) {
-                        new_zx *= RESCALE_FACTOR;
-                        new_zy *= RESCALE_FACTOR;
-                        cx *= RESCALE_FACTOR;
-                        cy *= RESCALE_FACTOR;
-                        scaleFactor /= RESCALE_FACTOR;
-                    } else if (newMag > RESCALE_HIGH) {
-                        new_zx /= RESCALE_FACTOR;
-                        new_zy /= RESCALE_FACTOR;
-                        cx /= RESCALE_FACTOR;
-                        cy /= RESCALE_FACTOR;
-                        scaleFactor *= RESCALE_FACTOR;
-                    }
-                    
-                    zx = new_zx;
-                    zy = new_zy;
-                    iter = i;
                 }
                 
-                vec3 col;
-                if (smooth_iter > 0.0) {
-                    col = palette(smooth_iter * 0.02 + u_time * 0.02);
+                // Scale by zoom (use distorted UV for water effect)
+                vec2 pixel_delta_c = distortedUV / u_zoom; 
+                
+                // Total delta = Center Offset (u_deltaC) + Pixel Offset
+                vec2 delta_c = u_deltaC + pixel_delta_c;
+                
+                // Morphing now applied in iteration loop, not here
+                
+                vec2 delta_n = vec2(0.0); // delta_0 = 0 (correct perturbation start)
+                
+                float iter = 0.0;
+                bool escaped = false;
+                bool glitched = false;
+                vec2 final_z = vec2(0.0);
+                
+                // Use minimum of both reference counts
+                int maxRef = min(u_refCount, u_refCount2);
+                
+                // Perturbation Loop with reference orbit blending
+                for(int i = 0; i < u_maxIter; i++) {
+                    if (i >= maxRef) break;
+                    
+                    // Fetch Z_n from PRIMARY orbit
+                    float z_re1 = texelFetch(u_refOrbitRe, ivec2(i, 0), 0).r;
+                    float z_im1 = texelFetch(u_refOrbitIm, ivec2(i, 0), 0).r;
+                    vec2 Z_n1 = vec2(z_re1, z_im1);
+                    
+                    // Fetch Z_n from SECONDARY orbit
+                    float z_re2 = texelFetch(u_refOrbitRe2, ivec2(i, 0), 0).r;
+                    float z_im2 = texelFetch(u_refOrbitIm2, ivec2(i, 0), 0).r;
+                    vec2 Z_n2 = vec2(z_re2, z_im2);
+                    
+                    // Blend between orbits based on u_morphBlend (0=primary, 1=secondary)
+                    vec2 Z_n = mix(Z_n1, Z_n2, u_morphBlend);
+                    
+                    // Perturbation Formula: delta_{n+1} = 2*Z_n*delta_n + delta_n^2 + delta_c
+                    // Apply subtle rotation twist for additional morphing
+                    
+                    vec2 linearVal = cmul(2.0 * Z_n, delta_n);
+                    vec2 quadroVal = csqr(delta_n);
+                    
+                    delta_n = linearVal + quadroVal + delta_c;
+                    
+                    // Check absolute escape
+                    vec2 z_abs = Z_n + delta_n;
+                    float mag2 = dot(z_abs, z_abs);
+                    if (mag2 > 256.0) { // Higher bailout for smooth shading
+                        escaped = true;
+                        iter = float(i);
+                        final_z = z_abs;
+                        break;
+                    }
+                }
+                
+                // DEBUG: Check Reference Data Integrity
+                if (false) { 
+                    float z0_r = texelFetch(u_refOrbitRe, ivec2(0,0), 0).r;
+                    if (abs(z0_r) < 0.0001) {
+                         // Z0 is 0 (Good)
+                         float z1_r = texelFetch(u_refOrbitRe, ivec2(1,0), 0).r;
+                         if (abs(z1_r + 0.5) < 0.01) {
+                             fragColor = vec4(0.0, 0.0, 1.0, 1.0); // BLUE = GOOD
+                         } else if (abs(z1_r) < 0.0001) {
+                             fragColor = vec4(0.0, 1.0, 1.0, 1.0); // CYAN = Z1 IS ZERO
+                         } else {
+                             fragColor = vec4(abs(z1_r + 0.5), 1.0, 0.0, 1.0); // Custom Yellow
+                         }
+                    } else {
+                        fragColor = vec4(1.0, 0.0, 0.0, 1.0); // RED = Z0 BAD
+                    }
+                    return;
+                }
+                
+                if (glitched) {
+                   fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                }
+                else if (escaped) {
+                    // Smooth Iteration Count (Renormalization)
+                    float log_zn = log(dot(final_z, final_z)) / 2.0;
+                    float nu = log(log_zn / log(2.0)) / log(2.0);
+                    float smooth_iter = iter + 1.0 - nu;
+                    
+                    // Original Aesthetic Logic
+                    vec3 col = palette(smooth_iter * 0.02 + u_time * 0.02);
                     float glow = 1.0 / (smooth_iter * 0.03 + 0.5);
                     col += vec3(0.2, 0.1, 0.5) * glow;
                     
-                    // Audio-reactive ripple effect
+                    // Ripples - Audio-reactive color waves
                     for (int r = 0; r < 4; r++) {
                         vec4 ripple = u_ripples[r];
                         if (ripple.y > 0.001) {
-                            float wave = sin(smooth_iter * 0.3 + ripple.x * 8.0) * ripple.y;
-                            col += vec3(0.1, 0.2, 0.3) * wave;
+                            // ripple.x = time since birth, ripple.y = intensity
+                            // Create expanding wave pattern based on iteration count
+                            float wave = sin(smooth_iter * 0.5 + ripple.x * 12.0) * ripple.y;
+                            // More dramatic color shift - cyan/magenta based on wave
+                            col += vec3(0.3, 0.5, 0.8) * wave * 3.0;  // 3x intensity boost
                         }
                     }
+                    
+                    // ===== RADIAL COLOR PULSE =====
+                    // Creates expanding color wave from center to edge of screen
+                    float screenDist = length(v_uv);  // Distance from screen center
+                    for (int r = 0; r < 4; r++) {
+                        vec4 ripple = u_ripples[r];
+                        if (ripple.y > 0.001) {
+                            float pulseSpeed = 3.0;
+                            float pulsePhase = ripple.x * pulseSpeed;
+                            // Expanding ring from center
+                            float ringDist = mod(pulsePhase, 2.0);
+                            float ringWidth = 0.2;
+                            float ringStrength = exp(-abs(screenDist - ringDist) / ringWidth) * ripple.y;
+                            // Add warm color pulse (orange/pink)
+                            col += vec3(1.0, 0.4, 0.3) * ringStrength * 0.5;
+                        }
+                    }
+                    
+                    fragColor = vec4(clamp(col, 0.0, 1.0) * u_brightness, 1.0);
                 } else {
-                    float inner = iter / max_iter;
-                    col = vec3(0.02, 0.01, 0.05) + vec3(0.02, 0.03, 0.08) * inner;
+                    float inner = iter / float(u_maxIter);
+                    vec3 col = vec3(0.02, 0.01, 0.05) + vec3(0.02, 0.03, 0.08) * inner;
+                    fragColor = vec4(col * u_brightness, 1.0);
                 }
-                
-                // Vignette
-                vec2 vignetteUV = gl_FragCoord.xy / u_resolution.xy - 0.5;
-                float vignette = 1.0 - dot(vignetteUV, vignetteUV) * 0.4;
-                col *= vignette;
-                
-                fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
             }
         `;
 
@@ -888,6 +1047,10 @@ if __name__ == "__main__":
             
             const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false });
             if (!gl) return;
+            
+            // Enable Floating Point Extensions
+            gl.getExtension('EXT_color_buffer_float');
+            gl.getExtension('OES_texture_float_linear'); // Good for sampling
 
             function createShader(gl, type, source) {
                 const s = gl.createShader(type);
@@ -899,6 +1062,30 @@ if __name__ == "__main__":
                     return null;
                 }
                 return s;
+            }
+
+            // Helper to parse Base64 Float32 data
+            function base64ToFloat32Array(b64) {
+                const binary_string = window.atob(b64);
+                const len = binary_string.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) {
+                    bytes[i] = binary_string.charCodeAt(i);
+                }
+                return new Float32Array(bytes.buffer);
+            }
+
+            // Create 1D Float Texture
+            function createRefTexture(gl, floatData) {
+                const tex = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                // WebGL 2 supports R32F
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, floatData.length, 1, 0, gl.RED, gl.FLOAT, floatData);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                return tex;
             }
 
             const program = gl.createProgram();
@@ -922,11 +1109,61 @@ if __name__ == "__main__":
 
             const locRes = gl.getUniformLocation(program, "u_resolution");
             const locTime = gl.getUniformLocation(program, "u_time");
-            const locFXH = gl.getUniformLocation(program, "u_fixX_h");
-            const locFYH = gl.getUniformLocation(program, "u_fixY_h");
             const locZoom = gl.getUniformLocation(program, "u_zoom");
-            const locInvZoom = gl.getUniformLocation(program, "u_invZoom");
+            const locDeltaC = gl.getUniformLocation(program, "u_deltaC");
             const locMaxIter = gl.getUniformLocation(program, "u_maxIter");
+            const locBrightness = gl.getUniformLocation(program, "u_brightness");
+            const locMorphIntensity = gl.getUniformLocation(program, "u_morphIntensity");
+            
+            // Texture Uniforms - PRIMARY
+            const locRefRe = gl.getUniformLocation(program, "u_refOrbitRe");
+            const locRefIm = gl.getUniformLocation(program, "u_refOrbitIm");
+            const locRefCount = gl.getUniformLocation(program, "u_refCount");
+            
+            // Texture Uniforms - SECONDARY (for morphing between orbits)
+            const locRefRe2 = gl.getUniformLocation(program, "u_refOrbitRe2");
+            const locRefIm2 = gl.getUniformLocation(program, "u_refOrbitIm2");
+            const locRefCount2 = gl.getUniformLocation(program, "u_refCount2");
+            const locMorphBlend = gl.getUniformLocation(program, "u_morphBlend");
+            
+            // Initial Data Load - ALL ORBITS
+            let refDataRe, refDataIm, texRefRe, texRefIm;
+            let refDataRe2, refDataIm2, texRefRe2, texRefIm2;
+            let refCount = 0;
+            let refCount2 = 0;
+            let currentOrbitIndex = 0;  // Track which pair we're morphing between
+            
+            if (window.INITIAL_REF_ORBIT) {
+                try {
+                    console.log("Loading Initial Reference Orbit...");
+                    refDataRe = base64ToFloat32Array(window.INITIAL_REF_ORBIT.re);
+                    refDataIm = base64ToFloat32Array(window.INITIAL_REF_ORBIT.im);
+                    refCount = window.INITIAL_REF_ORBIT.count;
+                    
+                    texRefRe = createRefTexture(gl, refDataRe);
+                    texRefIm = createRefTexture(gl, refDataIm);
+                    console.log(`Primary Reference Orbit Loaded: ${refCount} points`);
+                    
+                    // Load secondary orbit (second in array for blending)
+                    if (window.REF_ORBITS && window.REF_ORBITS.length > 1) {
+                        refDataRe2 = base64ToFloat32Array(window.REF_ORBITS[1].re);
+                        refDataIm2 = base64ToFloat32Array(window.REF_ORBITS[1].im);
+                        refCount2 = window.REF_ORBITS[1].count;
+                        texRefRe2 = createRefTexture(gl, refDataRe2);
+                        texRefIm2 = createRefTexture(gl, refDataIm2);
+                        console.log(`Secondary Reference Orbit Loaded: ${refCount2} points`);
+                    } else {
+                        // If only one orbit, use same for both
+                        texRefRe2 = texRefRe;
+                        texRefIm2 = texRefIm;
+                        refCount2 = refCount;
+                        console.log("Using same orbit for primary and secondary (no blending)");
+                    }
+                } catch(e) {
+                    console.error("Failed to load reference orbit:", e);
+                }
+            }
+            
             // Multi-ripple uniform locations
             const locRipples = [
                 gl.getUniformLocation(program, "u_ripples[0]"),
@@ -961,6 +1198,7 @@ if __name__ == "__main__":
                 enabled: true,
                 morphIntensity: 1.0,
                 rippleIntensity: 1.0,
+                colorPulseIntensity: 1.0,
                 bassZoomIntensity: 1.0
             };
             
@@ -993,13 +1231,23 @@ if __name__ == "__main__":
                     });
                 }
                 
-                // Ripple intensity slider
+                // Ripple (Water Distortion) intensity slider
                 const rippleSlider = document.getElementById('ripple-intensity');
                 const rippleValue = document.getElementById('ripple-value');
                 if (rippleSlider) {
                     rippleSlider.addEventListener('input', (e) => {
                         window.fractalSettings.rippleIntensity = parseFloat(e.target.value);
                         if (rippleValue) rippleValue.textContent = parseFloat(e.target.value).toFixed(1);
+                    });
+                }
+                
+                // Color Pulse intensity slider
+                const pulseSlider = document.getElementById('pulse-intensity');
+                const pulseValue = document.getElementById('pulse-value');
+                if (pulseSlider) {
+                    pulseSlider.addEventListener('input', (e) => {
+                        window.fractalSettings.colorPulseIntensity = parseFloat(e.target.value);
+                        if (pulseValue) pulseValue.textContent = parseFloat(e.target.value).toFixed(1);
                     });
                 }
                 
@@ -1154,10 +1402,10 @@ if __name__ == "__main__":
             let actualZoomRate = cfg.zoom.rate;
             
             // ========== MANDELBROT - MISIUREWICZ POINT INFINITE ZOOM ==========
-            // "Seahorse Valley" spiral point - perfect self-similarity!
+            // Seahorse Valley spiral - on boundary with infinite self-similar detail!
             const TARGET_X = -0.743643887037158704752191506114774;
             const TARGET_Y = 0.131825904205311970493132056385139;
-            const MAX_ZOOM_LOG = 12;  // Reset at ~163,000x zoom (DS precision limit)
+            const MAX_ZOOM_LOG = 48;  // Extended well past previous limit (~10^14)
             
             // Camera locked to Misiurewicz point
             let centerX = TARGET_X;
@@ -1177,6 +1425,25 @@ if __name__ == "__main__":
             let smoothedDelta = 0.0166;
             let accumulatedTime = 0;
             let accumulatedZoomLog = 0;
+            
+            // ===== TRUE INFINITE ZOOM - Rebasing System =====
+            // Track high-precision center as strings for rebasing
+            let currentCenterX = "-0.743643887037158704752191506114774";
+            let currentCenterY = "0.131825904205311970493132056385139";
+            let rebaseInProgress = false;
+            let lastRebaseZoom = 0;
+            const REBASE_THRESHOLD = 8.0;  // Trigger reset at ~3000x zoom (before precision issues)
+            const REBASE_COOLDOWN = 6.0;    // Full zoom cycle before reset
+            
+            // Function to reset zoom seamlessly (self-similarity means the pattern repeats)
+            function resetZoomSeamlessly() {
+                console.log("=== SEAMLESS ZOOM RESET (self-similarity) ===");
+                // The Misiurewicz point has self-similar structure
+                // Resetting zoom creates a natural loop as the pattern repeats
+                accumulatedZoomLog = 2.0;
+                lastRebaseZoom = accumulatedZoomLog;
+                console.log("Zoom reset to:", accumulatedZoomLog);
+            }
 
             // Ripple State - MULTI-RIPPLE SYSTEM (on window for settings access)
             // Each beat spawns a new ripple wave with its own birth time
@@ -1405,7 +1672,11 @@ if __name__ == "__main__":
                         window.lastBeatEnergy = 0;
                         window.globalAudioTime = 0;
                         window.ripples = [];
-                        console.log("New Track Loaded - Ripple Stats Reset");
+                        console.log("New Track Loaded - All Stats Reset");
+                        // Full refresh for new song
+                        if (typeof window.refreshFractalEffects === 'function') {
+                            window.refreshFractalEffects();
+                        }
                      };
 
                      element.addEventListener('seeking', onSeek);
@@ -1485,15 +1756,16 @@ if __name__ == "__main__":
                     avgBeatDelta = avgBeatDelta * 0.95 + activity * 0.05;
                     
                     // SAFETY CLAMP: Prevent threshold from running away on loud tracks
-                    if (avgBeatDelta > 0.1) avgBeatDelta = 0.1;
+                    if (avgBeatDelta > 0.08) avgBeatDelta = 0.08;
                     
-                    // Dynamic Trigger
-                    const dynamicThreshold = Math.max(0.005, avgBeatDelta * 1.5);
+                    // Dynamic Trigger - LOWER for more sensitivity
+                    const dynamicThreshold = Math.max(0.002, avgBeatDelta * 1.2);
                     
-                    if (beatDelta > dynamicThreshold && beatEnergy > 0.1) { 
+                    if (beatDelta > dynamicThreshold && beatEnergy > 0.05) { 
                          // PERCUSSION HIT! Spawn a new ripple wave
                          const rippleType = bassEnergy > midEnergy ? 'bass' : 'mid';
-                         const intensity = rippleType === 'bass' ? 0.12 : 0.06;
+                         // Strong intensity for both bass and mid
+                         const intensity = rippleType === 'bass' ? 0.5 : 0.5;
                          
                          // Add new ripple to pool
                          window.ripples.push({
@@ -1565,9 +1837,9 @@ if __name__ == "__main__":
                 // NOTE: Zoom accumulation is now handled by the adaptive zoom pause system below
 
                 const dpr = window.devicePixelRatio || 1;
-                const qualityScale = 0.75;  // Balance between quality and performance (0.5-1.0)
-                const MAX_W = 2560;
-                const MAX_H = 1440;
+                const qualityScale = 1.0;  // FULL 4K RESOLUTION
+                const MAX_W = 4096;        // Unlocked for 4K
+                const MAX_H = 2160;
                 let targetW = Math.floor(canvas.clientWidth * dpr * qualityScale);
                 let targetH = Math.floor(canvas.clientHeight * dpr * qualityScale);
                 if (targetW > MAX_W) { targetH = Math.floor(targetH * (MAX_W / targetW)); targetW = MAX_W; }
@@ -1594,19 +1866,111 @@ if __name__ == "__main__":
                 
                 // Always zoom in
                 accumulatedZoomLog += effectiveZoomRate * smoothedDelta;
-                // No reset needed - shader rescaling handles infinite precision
+                
+                let brightnessMultiplier = 1.0;  // Always full brightness
                 
                 // Dynamic max iterations - sync with zoom log
-                let gpuMaxIter = cfg.iteration.baseCount + cfg.iteration.logMultiplier * accumulatedZoomLog;
-                if (gpuMaxIter > 4000) gpuMaxIter = 4000;
+                // Use explicit fallbacks in case config doesn't load properly
+                const iterBaseCount = cfg.iteration?.baseCount || 300;
+                const iterLogMult = cfg.iteration?.logMultiplier || 100;  // Higher multiplier for deep zoom
+                let gpuMaxIter = Math.floor(iterBaseCount + iterLogMult * accumulatedZoomLog);
+                if (gpuMaxIter < 100) gpuMaxIter = 100;   // Floor: minimum 100 iterations for zoomed out view
+                if (gpuMaxIter > 9000) gpuMaxIter = 9000;  // Cap at 9000 (we have 10000 reference points)
+                window.currentGpuMaxIter = gpuMaxIter;  // Store for debug access
+                
+                // ===== DEBUG: Zoom level display (removed reset for testing) =====
+                // Press SPACE to pause/resume zoom and see the current level
+                if (typeof window.zoomPaused === 'undefined') {
+                    window.zoomPaused = false;
+                    document.addEventListener('keydown', (e) => {
+                        if (e.code === 'Space') {
+                            window.zoomPaused = !window.zoomPaused;
+                            const zoomFactor = Math.exp(accumulatedZoomLog);
+                            console.log(`=== ZOOM ${window.zoomPaused ? 'PAUSED' : 'RESUMED'} ===`);
+                            console.log(`  accumulatedZoomLog: ${accumulatedZoomLog.toFixed(4)}`);
+                            console.log(`  Zoom factor: ${zoomFactor.toExponential(3)} (${zoomFactor.toLocaleString()}x)`);
+                            console.log(`  Max iterations: ${window.currentGpuMaxIter}`);
+                        }
+                    });
+                    console.log("DEBUG: Press SPACE to pause zoom and see current level");
+                }
+                
+                // Skip zoom increment if paused
+                if (window.zoomPaused) {
+                    accumulatedZoomLog -= effectiveZoomRate * smoothedDelta; // Undo the increment
+                }
+                
+                // Zoom reset now handled by black screen detection (morph boosting + fallback)
+                // Old zoom-level based reset removed
 
                 gl.uniform2f(locRes, canvas.width, canvas.height);
                 gl.uniform1f(locTime, accumulatedTime);
-                gl.uniform2fv(locFXH, splitDouble(centerX));
-                gl.uniform2fv(locFYH, splitDouble(centerY));
-                gl.uniform2fv(locZoom, splitDouble(zoom));
-                gl.uniform2fv(locInvZoom, splitDouble(1.0 / zoom));
-                gl.uniform1f(locMaxIter, gpuMaxIter);
+                gl.uniform1f(locBrightness, brightnessMultiplier);  // Fade transition
+                
+                // Pass morph intensity for fractal structure evolution
+                const morphIntensity = window.fractalSettings?.morphIntensity ?? 1.0;
+                gl.uniform1f(locMorphIntensity, morphIntensity);
+                
+                // For perturbation, u_zoom is just the zoom factor (float)
+                // We use log zoom usually, so zoom = exp(log_zoom)
+                // But passing as vec2 (x,y) if used for aspect? No, shader uses u_zoom as vec2?
+                // Shader: uniform vec2 u_zoom;
+                // Code: vec2 pixel_delta_c = uv / u_zoom;
+                // So u_zoom should be vec2(zoom, zoom)? Or just float?
+                // Let's pass vec2(zoom, zoom)
+                gl.uniform2f(locZoom, zoom, zoom);
+                
+                // Delta C: u_deltaC = Center - RefCenter
+                // In this initial version, Reference Center IS the Center, so deltaC = 0
+                // If we pan, we update this.
+                // Assuming we haven't moved far:
+                
+                // Hardcoded initial center matching Python
+                // (-0.743643887037158704752191506114774, 0.131825904205311970493132056385139)
+                // CenterX, CenterY in JS are likely 0,0 or something simple if we didn't init them.
+                // Wait, centerX/centerY are updated by mouse/keys.
+                // We need to calculate the difference.
+                // BUT JS doesn't have high precision 'centerX'.
+                // So we can only pan a tiny bit before we need REBASE.
+                // For "Testing", let's assume DeltaC is 0 for now (perfect center match).
+                gl.uniform2f(locDeltaC, 0.0, 0.0); 
+
+                gl.uniform1i(locMaxIter, gpuMaxIter);
+                
+                // Bind Textures - PRIMARY ORBIT
+                if (texRefRe && texRefIm) {
+                    gl.activeTexture(gl.TEXTURE0);
+                    gl.bindTexture(gl.TEXTURE_2D, texRefRe);
+                    gl.uniform1i(locRefRe, 0);
+                    
+                    gl.activeTexture(gl.TEXTURE1);
+                    gl.bindTexture(gl.TEXTURE_2D, texRefIm);
+                    gl.uniform1i(locRefIm, 1);
+                    
+                    gl.uniform1i(locRefCount, refCount);
+                }
+                
+                // Bind Textures - SECONDARY ORBIT (for blending)
+                if (texRefRe2 && texRefIm2) {
+                    gl.activeTexture(gl.TEXTURE2);
+                    gl.bindTexture(gl.TEXTURE_2D, texRefRe2);
+                    gl.uniform1i(locRefRe2, 2);
+                    
+                    gl.activeTexture(gl.TEXTURE3);
+                    gl.bindTexture(gl.TEXTURE_2D, texRefIm2);
+                    gl.uniform1i(locRefIm2, 3);
+                    
+                    gl.uniform1i(locRefCount2, refCount2);
+                }
+                
+                // Calculate morph blend value (oscillates between 0 and 1 based on time)
+                // morphIntensity controls how fast/far the blend goes
+                // autoMorphBoost is added when black screen is detected to find complexity
+                const morphSpeed = 0.1;  // How fast to blend between orbits
+                const baseMorphBlend = (Math.sin(accumulatedTime * morphSpeed * morphIntensity) + 1.0) * 0.5;
+                const autoBoost = window.autoMorphBoost || 0;
+                const morphBlend = Math.min(1.0, baseMorphBlend + autoBoost);
+                gl.uniform1f(locMorphBlend, morphBlend);
                 
                 // Populate ripple uniforms with top 4 ripples (sorted by intensity)
                 const rippleMultiplier = window.fractalSettings?.rippleIntensity ?? 1.0;
@@ -1622,6 +1986,75 @@ if __name__ == "__main__":
                 }
 
                 gl.drawArrays(gl.TRIANGLES, 0, 6);
+                
+                // ===== BLACK SCREEN DETECTION =====
+                // Reset zoom if screen is black for more than 1 second
+                if (typeof window.blackScreenStartTime === 'undefined') {
+                    window.blackScreenStartTime = 0;
+                    window.blackScreenDebugCounter = 0;
+                }
+                
+                // Sample multiple pixels to check if black
+                const pixels = new Uint8Array(4);
+                let totalBrightness = 0;
+                
+                // Sample center and corners
+                const samplePoints = [
+                    [Math.floor(canvas.width/2), Math.floor(canvas.height/2)],
+                    [Math.floor(canvas.width/4), Math.floor(canvas.height/4)],
+                    [Math.floor(canvas.width*3/4), Math.floor(canvas.height*3/4)]
+                ];
+                
+                for (const [x, y] of samplePoints) {
+                    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                    totalBrightness += (pixels[0] + pixels[1] + pixels[2]) / 3;
+                }
+                const avgBrightness = totalBrightness / samplePoints.length;
+                
+                // Debug logging every 60 frames (~1 second)
+                window.blackScreenDebugCounter++;
+                if (window.blackScreenDebugCounter >= 60) {
+                    window.blackScreenDebugCounter = 0;
+                    if (avgBrightness < 10) {
+                        console.log(`BLACK SCREEN CHECK: brightness=${avgBrightness.toFixed(1)}, timer=${window.blackScreenStartTime > 0 ? ((performance.now() - window.blackScreenStartTime)/1000).toFixed(1) + 's' : 'not started'}`);
+                    }
+                }
+                
+                if (avgBrightness < 10) {  // Basically black
+                    if (window.blackScreenStartTime === 0) {
+                        window.blackScreenStartTime = performance.now();
+                        window.blackScreenTotalTime = performance.now();  // Track total time black
+                        window.autoMorphBoost = window.autoMorphBoost || 0;
+                        console.log("BLACK SCREEN: Timer started, will boost morph");
+                    } else if (performance.now() - window.blackScreenStartTime > 500) {
+                        // Black for more than 0.5 seconds - increase morph to find complexity
+                        window.autoMorphBoost = (window.autoMorphBoost || 0) + 0.02;
+                        if (window.autoMorphBoost > 1.0) window.autoMorphBoost = 1.0;
+                        console.log(`BLACK SCREEN: Boosting morph blend to ${window.autoMorphBoost.toFixed(2)}`);
+                        window.blackScreenStartTime = performance.now();  // Reset timer to keep boosting
+                        
+                        // FALLBACK: If morph boosting has been active for 5+ seconds, reset zoom
+                        const totalBlackTime = (performance.now() - window.blackScreenTotalTime) / 1000;
+                        if (totalBlackTime > 5) {
+                            console.log("=== FALLBACK: Morph failed after 5 seconds - ZOOM RESET ===");
+                            accumulatedZoomLog = -5.0;  // Reset to zoomed out
+                            window.autoMorphBoost = 0;
+                            window.blackScreenStartTime = 0;
+                            window.blackScreenTotalTime = 0;
+                        }
+                    }
+                } else {
+                    if (window.blackScreenStartTime > 0) {
+                        console.log("COMPLEXITY RESTORED: morph boost cancelled");
+                    }
+                    window.blackScreenStartTime = 0;
+                    // Slowly decay the auto morph boost when complexity returns
+                    if (window.autoMorphBoost > 0) {
+                        window.autoMorphBoost -= 0.001;
+                        if (window.autoMorphBoost < 0) window.autoMorphBoost = 0;
+                    }
+                }
+                
                 requestAnimationFrame(render);
             }
             requestAnimationFrame((t) => {
@@ -1639,8 +2072,8 @@ if __name__ == "__main__":
     })();
     """
     import os
-    music_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "Music"))
-    config_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "fractal_config.json"))
-    app_dir = os.path.normpath(os.path.dirname(__file__))
-    demo.launch(share=False, server_name="127.0.0.1", server_port=7860, theme=theme, css=css, js=js, allowed_paths=[music_dir, config_path, app_dir])
+    app_dir = os.path.abspath(os.path.dirname(__file__))
+    music_dir = os.path.join(app_dir, "Music")
+    config_path = os.path.join(app_dir, "fractal_config.json")
+    demo.launch(share=False, server_name="127.0.0.1", server_port=7872, theme=theme, css=css, js=js, allowed_paths=[app_dir])
 
