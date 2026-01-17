@@ -1352,6 +1352,29 @@ if __name__ == "__main__":
                 window.globalAudioTime = 0;
                 console.log('Ripple state reset');
                 
+                // Reset zoom and time accumulators to prevent precision issues
+                accumulatedTime = 0;
+                accumulatedZoomLog = 2.0;  // Start slightly zoomed in
+                lastRebaseZoom = 2.0;
+                window.smoothedMaxIter = undefined;  // Will reinitialize
+                console.log('Zoom and time accumulators reset');
+                
+                // Reset morph state completely
+                if (window.morphState) {
+                    window.morphState.morphTime = 0;
+                    window.morphState.smoothedBlend = 0.5;
+                    window.morphState.smoothedSpeed = 0.5;
+                    window.morphState.mode = 'explore';
+                    window.morphState.freezeTimer = 0;
+                    window.morphState.lastBrightness = 50;
+                    console.log('Morph state reset');
+                }
+                
+                // Reset black screen detection
+                window.blackScreenStartTime = 0;
+                window.blackScreenTotalTime = 0;
+                window.autoMorphBoost = 0;
+                
                 // Force audio re-initialization by resetting isAudioActive
                 // This triggers the polling loop to re-establish the connection
                 isAudioActive = false;
@@ -1834,6 +1857,14 @@ if __name__ == "__main__":
                 const bassMultiplier = window.fractalSettings?.bassZoomIntensity ?? 1.0;
                 
                 accumulatedTime += smoothedDelta * (1.0 + (audioMorphBoost - 1.0) * morphMultiplier);
+                
+                // PREVENT PRECISION LOSS: Wrap accumulatedTime for color cycling stability
+                // 1000 seconds is enough for any animation cycle to complete
+                if (accumulatedTime > 1000.0) {
+                    accumulatedTime -= 1000.0;
+                    console.log("TIME: Wrapped accumulatedTime to prevent precision loss");
+                }
+                
                 // NOTE: Zoom accumulation is now handled by the adaptive zoom pause system below
 
                 const dpr = window.devicePixelRatio || 1;
@@ -1873,9 +1904,19 @@ if __name__ == "__main__":
                 // Use explicit fallbacks in case config doesn't load properly
                 const iterBaseCount = cfg.iteration?.baseCount || 300;
                 const iterLogMult = cfg.iteration?.logMultiplier || 100;  // Higher multiplier for deep zoom
-                let gpuMaxIter = Math.floor(iterBaseCount + iterLogMult * accumulatedZoomLog);
-                if (gpuMaxIter < 100) gpuMaxIter = 100;   // Floor: minimum 100 iterations for zoomed out view
-                if (gpuMaxIter > 9000) gpuMaxIter = 9000;  // Cap at 9000 (we have 10000 reference points)
+                let targetMaxIter = Math.floor(iterBaseCount + iterLogMult * accumulatedZoomLog);
+                if (targetMaxIter < 100) targetMaxIter = 100;   // Floor: minimum 100 iterations for zoomed out view
+                if (targetMaxIter > 9000) targetMaxIter = 9000;  // Cap at 9000 (we have 10000 reference points)
+                
+                // SMOOTHED ITERATION COUNT - prevents flickering from discrete jumps
+                // Initialize smoothed value on first run
+                if (typeof window.smoothedMaxIter === 'undefined') {
+                    window.smoothedMaxIter = targetMaxIter;
+                }
+                // Use 98/2 blend for very gradual transitions (changes spread over ~50 frames)
+                window.smoothedMaxIter = window.smoothedMaxIter * 0.98 + targetMaxIter * 0.02;
+                let gpuMaxIter = Math.floor(window.smoothedMaxIter);
+                
                 window.currentGpuMaxIter = gpuMaxIter;  // Store for debug access
                 
                 // ===== DEBUG: Zoom level display (removed reset for testing) =====
@@ -1900,8 +1941,20 @@ if __name__ == "__main__":
                     accumulatedZoomLog -= effectiveZoomRate * smoothedDelta; // Undo the increment
                 }
                 
-                // Zoom reset now handled by black screen detection (morph boosting + fallback)
-                // Old zoom-level based reset removed
+                // ===== PROACTIVE ZOOM RESET =====
+                // Trigger seamless reset BEFORE precision issues cause instability
+                // Misiurewicz points are self-similar, so the pattern repeats at lower zoom
+                if (accumulatedZoomLog > REBASE_THRESHOLD && accumulatedZoomLog - lastRebaseZoom > REBASE_COOLDOWN) {
+                    console.log(`ZOOM RESET: accumulatedZoomLog=${accumulatedZoomLog.toFixed(2)} > threshold=${REBASE_THRESHOLD}`);
+                    resetZoomSeamlessly();
+                    
+                    // Also reset morph state to prevent accumulated artifacts
+                    if (window.morphState) {
+                        window.morphState.morphTime = 0;
+                        window.morphState.smoothedBlend = 0.5;
+                        window.morphState.mode = 'explore';
+                    }
+                }
 
                 gl.uniform2f(locRes, canvas.width, canvas.height);
                 gl.uniform1f(locTime, accumulatedTime);
@@ -1963,14 +2016,105 @@ if __name__ == "__main__":
                     gl.uniform1i(locRefCount2, refCount2);
                 }
                 
-                // Calculate morph blend value (oscillates between 0 and 1 based on time)
-                // morphIntensity controls how fast/far the blend goes
-                // autoMorphBoost is added when black screen is detected to find complexity
-                const morphSpeed = 0.1;  // How fast to blend between orbits
-                const baseMorphBlend = (Math.sin(accumulatedTime * morphSpeed * morphIntensity) + 1.0) * 0.5;
+                // ===== COMPLEXITY-ADAPTIVE MORPH SYSTEM =====
+                // Combines: (1) brightness-adaptive speed, (2) sticky freeze, (3) explore/observe mode
+                
+                // Initialize morph state variables on first run
+                if (typeof window.morphState === 'undefined') {
+                    window.morphState = {
+                        mode: 'explore',           // 'explore' = searching, 'observe' = viewing complexity
+                        frozenBlend: 0.5,          // Blend value when frozen
+                        freezeTimer: 0,            // Seconds remaining in freeze
+                        lastBrightness: 0,         // For smoothing
+                        morphTime: 0,              // Independent morph time accumulator
+                        observeThreshold: 40,      // Brightness above this = complex (0-255)
+                        exploreThreshold: 15,      // Brightness below this = boring (trigger explore)
+                        freezeDuration: 4.0,       // How long to freeze when complexity found (seconds)
+                        smoothedBlend: 0.5,        // Output-smoothed blend to prevent jitter
+                        smoothedSpeed: 0.5,        // Smoothed effective speed to prevent velocity jumps
+                    };
+                }
+                const ms = window.morphState;
+                
+                // Sample brightness was already calculated in black screen detection
+                // but we need it BEFORE draw for morph calc, so we use last frame's value
+                // (slight lag is fine for this smooth effect)
+                const currentBrightness = ms.lastBrightness;
+                
+                // Complexity score: 0 = black/boring, 1 = bright/complex
+                const complexityScore = Math.min(1.0, currentBrightness / 128.0);
+                
+                // MODE TRANSITIONS with hysteresis
+                if (ms.mode === 'explore') {
+                    // In explore mode: looking for complexity
+                    if (currentBrightness > ms.observeThreshold) {
+                        // Found complexity! Switch to observe mode
+                        console.log(`MORPH: Found complexity (brightness=${currentBrightness.toFixed(1)}) - switching to OBSERVE mode`);
+                        ms.mode = 'observe';
+                        ms.frozenBlend = (Math.sin(ms.morphTime * 0.1 * morphIntensity) + 1.0) * 0.5;
+                        ms.freezeTimer = ms.freezeDuration;
+                    }
+                } else {
+                    // In observe mode: showing complexity
+                    if (ms.freezeTimer > 0) {
+                        ms.freezeTimer -= smoothedDelta;
+                    } else if (currentBrightness < ms.exploreThreshold) {
+                        // Lost complexity, switch back to explore
+                        console.log(`MORPH: Lost complexity (brightness=${currentBrightness.toFixed(1)}) - switching to EXPLORE mode`);
+                        ms.mode = 'explore';
+                    }
+                }
+                
+                // Calculate morph speed based on mode and complexity
+                const baseMorphSpeed = 0.1;
+                let targetMorphSpeed;
+                if (ms.mode === 'explore') {
+                    // Explore: fast morph to find interesting areas (5x faster)
+                    targetMorphSpeed = baseMorphSpeed * 5.0;
+                } else {
+                    // Observe: very slow morph to savor complexity (10x slower)
+                    // Also scales down further with complexity - more complex = slower
+                    targetMorphSpeed = baseMorphSpeed * 0.1 * (1.0 - complexityScore * 0.9);
+                }
+                
+                // SMOOTHED SPEED TRANSITION - prevents jarring jumps when mode changes
+                // Use 95/5 blend for very gradual velocity changes (takes ~20 frames to fully transition)
+                ms.smoothedSpeed = ms.smoothedSpeed * 0.95 + targetMorphSpeed * 0.05;
+                let effectiveMorphSpeed = ms.smoothedSpeed;
+                
+                // Apply morph intensity multiplier
+                effectiveMorphSpeed *= morphIntensity;
+                
+                // Accumulate morph time (independent of zoom time)
+                ms.morphTime += smoothedDelta * effectiveMorphSpeed / baseMorphSpeed;
+                
+                // PREVENT PRECISION LOSS: Wrap morphTime to avoid unbounded growth
+                // 628 = 100 * 2*PI, so sin() cycles seamlessly at this point
+                if (ms.morphTime > 628.0) {
+                    ms.morphTime -= 628.0;
+                    console.log("MORPH: Time wrapped to prevent precision loss");
+                }
+                
+                // Calculate base morph blend
+                let morphBlend;
+                if (ms.mode === 'observe' && ms.freezeTimer > 0) {
+                    // FROZEN: use saved blend value with very subtle drift
+                    const driftAmount = (ms.freezeDuration - ms.freezeTimer) * 0.01;  // Tiny drift over time
+                    morphBlend = ms.frozenBlend + Math.sin(driftAmount) * 0.02;
+                } else {
+                    // Normal oscillation
+                    morphBlend = (Math.sin(ms.morphTime * baseMorphSpeed) + 1.0) * 0.5;
+                }
+                
+                // Add auto-boost from black screen detection (existing system)
                 const autoBoost = window.autoMorphBoost || 0;
-                const morphBlend = Math.min(1.0, baseMorphBlend + autoBoost);
-                gl.uniform1f(locMorphBlend, morphBlend);
+                morphBlend = Math.min(1.0, Math.max(0.0, morphBlend + autoBoost));
+                
+                // FINAL OUTPUT SMOOTHING - prevents ALL jitter by smoothing the actual value sent to shader
+                // 90/10 blend provides responsive but smooth transitions without visible jumps
+                ms.smoothedBlend = ms.smoothedBlend * 0.9 + morphBlend * 0.1;
+                
+                gl.uniform1f(locMorphBlend, ms.smoothedBlend);
                 
                 // Populate ripple uniforms with top 4 ripples (sorted by intensity)
                 const rippleMultiplier = window.fractalSettings?.rippleIntensity ?? 1.0;
@@ -2010,6 +2154,11 @@ if __name__ == "__main__":
                     totalBrightness += (pixels[0] + pixels[1] + pixels[2]) / 3;
                 }
                 const avgBrightness = totalBrightness / samplePoints.length;
+                
+                // Feed brightness to morph system for complexity detection
+                if (window.morphState) {
+                    window.morphState.lastBrightness = avgBrightness;
+                }
                 
                 // Debug logging every 60 frames (~1 second)
                 window.blackScreenDebugCounter++;
