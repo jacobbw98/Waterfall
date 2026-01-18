@@ -1354,8 +1354,8 @@ if __name__ == "__main__":
                 
                 // Reset zoom and time accumulators to prevent precision issues
                 accumulatedTime = 0;
-                accumulatedZoomLog = 2.0;  // Start slightly zoomed in
-                lastRebaseZoom = 2.0;
+                accumulatedZoomLog = 5.0;  // Start at interesting zoom depth
+                lastRebaseZoom = 5.0;
                 window.smoothedMaxIter = undefined;  // Will reinitialize
                 console.log('Zoom and time accumulators reset');
                 
@@ -1447,7 +1447,7 @@ if __name__ == "__main__":
             let lastFrameTime = performance.now();
             let smoothedDelta = 0.0166;
             let accumulatedTime = 0;
-            let accumulatedZoomLog = 0;
+            let accumulatedZoomLog = 5.0;  // Start at interesting zoom depth
             
             // ===== TRUE INFINITE ZOOM - Rebasing System =====
             // Track high-precision center as strings for rebasing
@@ -1455,15 +1455,15 @@ if __name__ == "__main__":
             let currentCenterY = "0.131825904205311970493132056385139";
             let rebaseInProgress = false;
             let lastRebaseZoom = 0;
-            const REBASE_THRESHOLD = 8.0;  // Trigger reset at ~3000x zoom (before precision issues)
-            const REBASE_COOLDOWN = 6.0;    // Full zoom cycle before reset
+            const REBASE_THRESHOLD = 15.0;  // Trigger reset at ~10^6x zoom (oscillation starts at ~17)
+            const REBASE_COOLDOWN = 10.0;   // Full zoom cycle through interesting levels before reset
             
             // Function to reset zoom seamlessly (self-similarity means the pattern repeats)
             function resetZoomSeamlessly() {
                 console.log("=== SEAMLESS ZOOM RESET (self-similarity) ===");
                 // The Misiurewicz point has self-similar structure
                 // Resetting zoom creates a natural loop as the pattern repeats
-                accumulatedZoomLog = 2.0;
+                accumulatedZoomLog = 5.0;  // Start at interesting zoom depth
                 lastRebaseZoom = accumulatedZoomLog;
                 console.log("Zoom reset to:", accumulatedZoomLog);
             }
@@ -1838,9 +1838,20 @@ if __name__ == "__main__":
                         audioZoomBoost = (bassEnergy - 0.2) * 0.8; 
                     }
                     
-                    // Mids/Highs speed up morphing
-                    // High multiplier (8.0) to make the shape dance noticeably
-                    audioMorphBoost = 1.0 + (midEnergy + highEnergy) * 8.0;
+                    // Mids/Highs speed up morphing - WITH RATE LIMITING
+                    // Raw target boost (reduced multiplier from 8.0 to 4.0)
+                    let targetMorphBoost = 1.0 + (midEnergy + highEnergy) * 4.0;
+                    
+                    // CAP maximum morph boost to prevent excessive speed
+                    targetMorphBoost = Math.min(targetMorphBoost, 3.0);  // Max 3x speed
+                    
+                    // FAST SMOOTH for responsive audio while preventing jitter
+                    // 70/30 blend responds in ~3 frames (~50ms) for tight beat sync
+                    if (typeof window.smoothedMorphBoost === 'undefined') {
+                        window.smoothedMorphBoost = 1.0;
+                    }
+                    window.smoothedMorphBoost = window.smoothedMorphBoost * 0.7 + targetMorphBoost * 0.3;
+                    audioMorphBoost = window.smoothedMorphBoost;
                     
                     // Update Debug Text - REMOVED for final polish
                     /*
@@ -1856,7 +1867,15 @@ if __name__ == "__main__":
                 const morphMultiplier = window.fractalSettings?.morphIntensity ?? 1.0;
                 const bassMultiplier = window.fractalSettings?.bassZoomIntensity ?? 1.0;
                 
-                accumulatedTime += smoothedDelta * (1.0 + (audioMorphBoost - 1.0) * morphMultiplier);
+                // Check if in observe mode - freeze all audio effects if so
+                const inObserveMode = window.morphState && window.morphState.mode === 'observe';
+                
+                if (inObserveMode) {
+                    // FROZEN: No audio effect on time during observe mode
+                    accumulatedTime += smoothedDelta;  // Just regular time, no audio boost
+                } else {
+                    accumulatedTime += smoothedDelta * (1.0 + (audioMorphBoost - 1.0) * morphMultiplier);
+                }
                 
                 // PREVENT PRECISION LOSS: Wrap accumulatedTime for color cycling stability
                 // 1000 seconds is enough for any animation cycle to complete
@@ -1889,10 +1908,19 @@ if __name__ == "__main__":
                 // Calculate zoom
                 const zoom = Math.exp(accumulatedZoomLog);
                 
-                // Zoom rate (audio-reactive)
-                let effectiveZoomRate = cfg.zoom.rate;
-                if (isAudioActive && audioZoomBoost > 0) {
-                    effectiveZoomRate += audioZoomBoost * bassMultiplier;
+                // DYNAMIC ZOOM LIMIT based on approaching iteration limits
+                // Slow down zoom as we approach the max iterations to prevent instability
+                const approachingLimit = accumulatedZoomLog > 25;  // Start slowing at ~10^10 zoom
+                let zoomSlowdown = 1.0;
+                if (approachingLimit) {
+                    // Gradually reduce zoom rate as we go deeper
+                    zoomSlowdown = Math.max(0.1, 1.0 - (accumulatedZoomLog - 25) / 20);
+                }
+                
+                // Zoom rate (audio-reactive) with dynamic limit
+                let effectiveZoomRate = cfg.zoom.rate * zoomSlowdown;
+                if (!inObserveMode && isAudioActive && audioZoomBoost > 0) {
+                    effectiveZoomRate += audioZoomBoost * bassMultiplier * zoomSlowdown;
                 }
                 
                 // Always zoom in
@@ -1953,7 +1981,13 @@ if __name__ == "__main__":
                         window.morphState.morphTime = 0;
                         window.morphState.smoothedBlend = 0.5;
                         window.morphState.mode = 'explore';
+                        window.morphState.modeSwitchCooldown = 10.0;  // 10 second cooldown before observe mode can activate
                     }
+                    
+                    // Reset black screen detection state
+                    window.blackScreenStartTime = 0;
+                    window.blackScreenTotalTime = 0;
+                    window.autoMorphBoost = 0;
                 }
 
                 gl.uniform2f(locRes, canvas.width, canvas.height);
@@ -2027,11 +2061,12 @@ if __name__ == "__main__":
                         freezeTimer: 0,            // Seconds remaining in freeze
                         lastBrightness: 0,         // For smoothing
                         morphTime: 0,              // Independent morph time accumulator
-                        observeThreshold: 40,      // Brightness above this = complex (0-255)
-                        exploreThreshold: 15,      // Brightness below this = boring (trigger explore)
-                        freezeDuration: 4.0,       // How long to freeze when complexity found (seconds)
+                        observeThreshold: 60,      // Brightness above this = complex (RAISED from 40)
+                        exploreThreshold: 10,      // Brightness below this = boring (LOWERED from 15)
+                        freezeDuration: 20.0,      // How long to freeze when complexity found (seconds) - INCREASED from 4
                         smoothedBlend: 0.5,        // Output-smoothed blend to prevent jitter
                         smoothedSpeed: 0.5,        // Smoothed effective speed to prevent velocity jumps
+                        modeSwitchCooldown: 0,     // Cooldown timer to prevent rapid mode switching
                     };
                 }
                 const ms = window.morphState;
@@ -2044,24 +2079,34 @@ if __name__ == "__main__":
                 // Complexity score: 0 = black/boring, 1 = bright/complex
                 const complexityScore = Math.min(1.0, currentBrightness / 128.0);
                 
-                // MODE TRANSITIONS with hysteresis
-                if (ms.mode === 'explore') {
-                    // In explore mode: looking for complexity
-                    if (currentBrightness > ms.observeThreshold) {
-                        // Found complexity! Switch to observe mode
-                        console.log(`MORPH: Found complexity (brightness=${currentBrightness.toFixed(1)}) - switching to OBSERVE mode`);
-                        ms.mode = 'observe';
-                        ms.frozenBlend = (Math.sin(ms.morphTime * 0.1 * morphIntensity) + 1.0) * 0.5;
-                        ms.freezeTimer = ms.freezeDuration;
-                    }
-                } else {
-                    // In observe mode: showing complexity
-                    if (ms.freezeTimer > 0) {
-                        ms.freezeTimer -= smoothedDelta;
-                    } else if (currentBrightness < ms.exploreThreshold) {
-                        // Lost complexity, switch back to explore
-                        console.log(`MORPH: Lost complexity (brightness=${currentBrightness.toFixed(1)}) - switching to EXPLORE mode`);
-                        ms.mode = 'explore';
+                // Decrement mode switch cooldown
+                if (ms.modeSwitchCooldown > 0) {
+                    ms.modeSwitchCooldown -= smoothedDelta;
+                }
+                
+                // MODE TRANSITIONS with hysteresis AND cooldown
+                // Can only switch modes when cooldown has elapsed
+                if (ms.modeSwitchCooldown <= 0) {
+                    if (ms.mode === 'explore') {
+                        // In explore mode: looking for complexity
+                        if (currentBrightness > ms.observeThreshold) {
+                            // Found complexity! Switch to observe mode
+                            console.log(`MORPH: Found complexity (brightness=${currentBrightness.toFixed(1)}) - switching to OBSERVE mode`);
+                            ms.mode = 'observe';
+                            ms.frozenBlend = (Math.sin(ms.morphTime * 0.1 * morphIntensity) + 1.0) * 0.5;
+                            ms.freezeTimer = ms.freezeDuration;
+                            ms.modeSwitchCooldown = 2.0;  // 2 second cooldown before can switch again
+                        }
+                    } else {
+                        // In observe mode: showing complexity
+                        if (ms.freezeTimer > 0) {
+                            ms.freezeTimer -= smoothedDelta;
+                        } else if (currentBrightness < ms.exploreThreshold) {
+                            // Lost complexity, switch back to explore
+                            console.log(`MORPH: Lost complexity (brightness=${currentBrightness.toFixed(1)}) - switching to EXPLORE mode`);
+                            ms.mode = 'explore';
+                            ms.modeSwitchCooldown = 2.0;  // 2 second cooldown before can switch again
+                        }
                     }
                 }
                 
@@ -2069,14 +2114,12 @@ if __name__ == "__main__":
                 const baseMorphSpeed = 0.1;
                 let targetMorphSpeed;
                 if (ms.mode === 'explore') {
-                    // Explore: fast morph to find interesting areas (5x faster)
-                    targetMorphSpeed = baseMorphSpeed * 5.0;
+                    // Explore: faster morph to find interesting areas (2x faster, reduced from 5x)
+                    targetMorphSpeed = baseMorphSpeed * 2.0;
                 } else {
-                    // Observe: very slow morph to savor complexity (10x slower)
-                    // Also scales down further with complexity - more complex = slower
-                    targetMorphSpeed = baseMorphSpeed * 0.1 * (1.0 - complexityScore * 0.9);
+                    // Observe: FREEZE morph completely to enjoy the complexity
+                    targetMorphSpeed = 0.0;
                 }
-                
                 // SMOOTHED SPEED TRANSITION - prevents jarring jumps when mode changes
                 // Use 95/5 blend for very gradual velocity changes (takes ~20 frames to fully transition)
                 ms.smoothedSpeed = ms.smoothedSpeed * 0.95 + targetMorphSpeed * 0.05;
@@ -2169,10 +2212,14 @@ if __name__ == "__main__":
                     }
                 }
                 
-                if (avgBrightness < 10) {  // Basically black
+                // BLACK SCREEN thresholds with hysteresis to prevent oscillation
+                const BLACK_TRIGGER = 5;    // Must be very dark to trigger
+                const BLACK_RECOVER = 30;   // Must be this bright to cancel (wider gap)
+                
+                if (avgBrightness < BLACK_TRIGGER) {  // Very dark
                     if (window.blackScreenStartTime === 0) {
                         window.blackScreenStartTime = performance.now();
-                        window.blackScreenTotalTime = performance.now();  // Track total time black
+                        window.blackScreenTotalTime = performance.now();
                         window.autoMorphBoost = window.autoMorphBoost || 0;
                         console.log("BLACK SCREEN: Timer started, will boost morph");
                     } else if (performance.now() - window.blackScreenStartTime > 500) {
@@ -2186,23 +2233,24 @@ if __name__ == "__main__":
                         const totalBlackTime = (performance.now() - window.blackScreenTotalTime) / 1000;
                         if (totalBlackTime > 5) {
                             console.log("=== FALLBACK: Morph failed after 5 seconds - ZOOM RESET ===");
-                            accumulatedZoomLog = -5.0;  // Reset to zoomed out
+                            accumulatedZoomLog = 5.0;  // Reset to interesting zoom level
                             window.autoMorphBoost = 0;
                             window.blackScreenStartTime = 0;
                             window.blackScreenTotalTime = 0;
                         }
                     }
-                } else {
+                } else if (avgBrightness > BLACK_RECOVER) {  // Brightness returned - with hysteresis
                     if (window.blackScreenStartTime > 0) {
                         console.log("COMPLEXITY RESTORED: morph boost cancelled");
                     }
                     window.blackScreenStartTime = 0;
                     // Slowly decay the auto morph boost when complexity returns
                     if (window.autoMorphBoost > 0) {
-                        window.autoMorphBoost -= 0.001;
+                        window.autoMorphBoost -= 0.01;  // Faster decay
                         if (window.autoMorphBoost < 0) window.autoMorphBoost = 0;
                     }
                 }
+                // Note: brightness between BLACK_TRIGGER and BLACK_RECOVER = HOLD current state (hysteresis)
                 
                 requestAnimationFrame(render);
             }
