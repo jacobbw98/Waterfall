@@ -790,13 +790,24 @@ if __name__ == "__main__":
     engine.max_iter = 10000  # High iteration count for deep zoom support
     
     # Collection of interesting Misiurewicz points for morphing
+    # These are all on/near the Mandelbrot set boundary with rich spiral structure
     MISIUREWICZ_POINTS = [
-        # Primary: Seahorse Valley spiral
+        # Seahorse Valley spiral (primary)
         ("-0.743643887037158704752191506114774", "0.131825904205311970493132056385139"),
-        # Secondary: Elephant Valley
+        # Elephant Valley
         ("0.281717921930775", "0.5771052841488505"),
-        # Tertiary: Double spiral
-        ("-0.1011", "0.9563"),
+        # Period-3 antenna tip (dendritic structure)
+        ("-1.7548776662466927600", "0.0"),
+        # Near basilica Julia set (twisted spirals)
+        ("-0.15652016683375568", "1.03224710892283213"),
+        # Classic Misiurewicz point c = i (period-2 pre-periodic)
+        ("0.0", "1.0"),
+        # Seahorse Valley variant (different spiral arm)
+        ("-0.7436438870371587", "0.1318259042053120"),
+        # Near mini-Mandelbrot in antenna
+        ("-1.25266025840032", "0.03400434424"),
+        # Double spiral near main cardioid
+        ("-0.390541", "0.586789"),
     ]
     
     ref_orbits = []
@@ -804,19 +815,24 @@ if __name__ == "__main__":
         print(f"  Generating orbit {i+1}/{len(MISIUREWICZ_POINTS)}: ({cx[:15]}..., {cy[:15]}...)")
         engine.set_view(cx, cy, "1.0")
         data = engine.get_orbit_as_bytes()
-        ref_orbits.append(data)
-        print(f"    -> {data['count']} points")
+        if data['count'] >= 1000:
+            ref_orbits.append(data)
+            print(f"    -> {data['count']} points [GOOD]")
+        else:
+            print(f"    -> {data['count']} points [SKIPPED - too few points, likely escapes]")
     
-    print(f"All {len(ref_orbits)} orbits ready!")
+    print(f"{len(ref_orbits)} valid orbits ready (from {len(MISIUREWICZ_POINTS)} candidates)!")
     
     demo, theme, css = create_pro_ui()
     
-    # Inject all orbit data into JS
+    # Inject all orbit data into JS — dynamically handles any number of valid orbits
+    orbit_entries = ",\n        ".join(
+        f'{{ re: "{o["re"]}", im: "{o["im"]}", count: {o["count"]} }}'
+        for o in ref_orbits
+    )
     js = f"""
     var REF_ORBITS = [
-        {{ re: "{ref_orbits[0]['re']}", im: "{ref_orbits[0]['im']}", count: {ref_orbits[0]['count']} }},
-        {{ re: "{ref_orbits[1]['re']}", im: "{ref_orbits[1]['im']}", count: {ref_orbits[1]['count']} }},
-        {{ re: "{ref_orbits[2]['re']}", im: "{ref_orbits[2]['im']}", count: {ref_orbits[2]['count']} }}
+        {orbit_entries}
     ];
     var INITIAL_REF_ORBIT = REF_ORBITS[0];  // Use first as default
     """ + """
@@ -1126,42 +1142,87 @@ if __name__ == "__main__":
             const locRefCount2 = gl.getUniformLocation(program, "u_refCount2");
             const locMorphBlend = gl.getUniformLocation(program, "u_morphBlend");
             
-            // Initial Data Load - ALL ORBITS
+            // Initial Data Load - ALL ORBITS with cycling support
             let refDataRe, refDataIm, texRefRe, texRefIm;
             let refDataRe2, refDataIm2, texRefRe2, texRefIm2;
             let refCount = 0;
             let refCount2 = 0;
-            let currentOrbitIndex = 0;  // Track which pair we're morphing between
             
-            if (window.INITIAL_REF_ORBIT) {
+            // Pre-decode ALL orbit data for cycling
+            const allOrbits = [];
+            let currentPrimaryIdx = 0;
+            let currentSecondaryIdx = 1;
+            
+            if (window.REF_ORBITS && window.REF_ORBITS.length > 0) {
                 try {
-                    console.log("Loading Initial Reference Orbit...");
-                    refDataRe = base64ToFloat32Array(window.INITIAL_REF_ORBIT.re);
-                    refDataIm = base64ToFloat32Array(window.INITIAL_REF_ORBIT.im);
-                    refCount = window.INITIAL_REF_ORBIT.count;
+                    console.log(`Decoding ${window.REF_ORBITS.length} reference orbits...`);
+                    for (let i = 0; i < window.REF_ORBITS.length; i++) {
+                        allOrbits.push({
+                            re: base64ToFloat32Array(window.REF_ORBITS[i].re),
+                            im: base64ToFloat32Array(window.REF_ORBITS[i].im),
+                            count: window.REF_ORBITS[i].count
+                        });
+                        console.log(`  Orbit ${i}: ${window.REF_ORBITS[i].count} points`);
+                    }
                     
+                    // Load primary orbit (index 0)
+                    refDataRe = allOrbits[0].re;
+                    refDataIm = allOrbits[0].im;
+                    refCount = allOrbits[0].count;
                     texRefRe = createRefTexture(gl, refDataRe);
                     texRefIm = createRefTexture(gl, refDataIm);
-                    console.log(`Primary Reference Orbit Loaded: ${refCount} points`);
+                    console.log(`Primary orbit loaded: index 0 (${refCount} points)`);
                     
-                    // Load secondary orbit (second in array for blending)
-                    if (window.REF_ORBITS && window.REF_ORBITS.length > 1) {
-                        refDataRe2 = base64ToFloat32Array(window.REF_ORBITS[1].re);
-                        refDataIm2 = base64ToFloat32Array(window.REF_ORBITS[1].im);
-                        refCount2 = window.REF_ORBITS[1].count;
-                        texRefRe2 = createRefTexture(gl, refDataRe2);
-                        texRefIm2 = createRefTexture(gl, refDataIm2);
-                        console.log(`Secondary Reference Orbit Loaded: ${refCount2} points`);
-                    } else {
-                        // If only one orbit, use same for both
-                        texRefRe2 = texRefRe;
-                        texRefIm2 = texRefIm;
-                        refCount2 = refCount;
-                        console.log("Using same orbit for primary and secondary (no blending)");
-                    }
+                    // Load secondary orbit (index 1, or 0 if only one)
+                    const secIdx = allOrbits.length > 1 ? 1 : 0;
+                    currentSecondaryIdx = secIdx;
+                    refDataRe2 = allOrbits[secIdx].re;
+                    refDataIm2 = allOrbits[secIdx].im;
+                    refCount2 = allOrbits[secIdx].count;
+                    texRefRe2 = createRefTexture(gl, refDataRe2);
+                    texRefIm2 = createRefTexture(gl, refDataIm2);
+                    console.log(`Secondary orbit loaded: index ${secIdx} (${refCount2} points)`);
+                    console.log(`Total orbits available for cycling: ${allOrbits.length}`);
                 } catch(e) {
-                    console.error("Failed to load reference orbit:", e);
+                    console.error("Failed to load reference orbits:", e);
                 }
+            }
+            
+            // Helper to update a texture with new orbit data
+            function updateOrbitTexture(tex, data) {
+                const texWidth = 4096;
+                const padded = new Float32Array(texWidth);
+                padded.set(data.subarray(0, Math.min(data.length, texWidth)));
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, texWidth, 1, 0, gl.RED, gl.FLOAT, padded);
+            }
+            
+            // ORBIT CYCLING: advance to next orbit pair
+            // When blend reaches 1.0, secondary becomes primary, next orbit becomes secondary
+            function advanceOrbit() {
+                if (allOrbits.length < 2) return;
+                
+                // Secondary becomes primary (swap textures)
+                const tmpRe = texRefRe;  const tmpIm = texRefIm;
+                texRefRe = texRefRe2;    texRefIm = texRefIm2;
+                refCount = refCount2;
+                currentPrimaryIdx = currentSecondaryIdx;
+                
+                // Advance to next orbit in pool (wrap around)
+                currentSecondaryIdx = (currentSecondaryIdx + 1) % allOrbits.length;
+                // Skip if same as primary
+                if (currentSecondaryIdx === currentPrimaryIdx) {
+                    currentSecondaryIdx = (currentSecondaryIdx + 1) % allOrbits.length;
+                }
+                
+                // Load new secondary orbit into the old primary textures
+                texRefRe2 = tmpRe;  texRefIm2 = tmpIm;
+                const nextOrbit = allOrbits[currentSecondaryIdx];
+                updateOrbitTexture(texRefRe2, nextOrbit.re);
+                updateOrbitTexture(texRefIm2, nextOrbit.im);
+                refCount2 = nextOrbit.count;
+                
+                console.log(`ORBIT CYCLE: primary=${currentPrimaryIdx}, secondary=${currentSecondaryIdx} (${allOrbits.length} total)`);
             }
             
             // Multi-ripple uniform locations
@@ -1354,7 +1415,7 @@ if __name__ == "__main__":
                 
                 // Reset zoom and time accumulators to prevent precision issues
                 accumulatedTime = 0;
-                accumulatedZoomLog = -5;  // Start in blackness for seamless transition
+                accumulatedZoomLog = -5;  // Start in blackness for dramatic zoom-in
                 lastRebaseZoom = -5;
                 startupTime = performance.now();  // Reset startup delay timer
                 window.smoothedMaxIter = undefined;  // Will reinitialize
@@ -1451,7 +1512,7 @@ if __name__ == "__main__":
             let lastFrameTime = performance.now();
             let smoothedDelta = 0.0166;
             let accumulatedTime = 0;
-            let accumulatedZoomLog = -5;  // Start zoomed out in blackness for seamless reset
+            let accumulatedZoomLog = -5;  // Start in blackness for dramatic zoom-in
             let startupTime = performance.now();  // Track startup for delayed black screen detection
             
             // ===== TRUE INFINITE ZOOM - Rebasing System =====
@@ -1460,15 +1521,15 @@ if __name__ == "__main__":
             let currentCenterY = "0.131825904205311970493132056385139";
             let rebaseInProgress = false;
             let lastRebaseZoom = 0;
-            const REBASE_THRESHOLD = 25.0;  // Deeper zoom before reset (~10^10x) - cooldowns handle oscillation
-            const REBASE_COOLDOWN = 15.0;   // Full zoom cycle through interesting levels before reset
+            const REBASE_THRESHOLD = 35.0;  // Much deeper zoom before reset (~10^15x) for long smooth zooms
+            const REBASE_COOLDOWN = 25.0;   // Full long zoom cycle through interesting levels before reset
             
             // Function to reset zoom seamlessly (self-similarity means the pattern repeats)
             function resetZoomSeamlessly() {
                 console.log("=== SEAMLESS ZOOM RESET (self-similarity) ===");
                 // The Misiurewicz point has self-similar structure
                 // Resetting zoom creates a natural loop as the pattern repeats
-                accumulatedZoomLog = -5;  // Start in blackness for seamless transition
+                accumulatedZoomLog = -5;  // Start in blackness for dramatic zoom-in
                 lastRebaseZoom = accumulatedZoomLog;
                 startupTime = performance.now();  // Reset startup delay for black screen detection
                 console.log("Zoom reset to:", accumulatedZoomLog);
@@ -1749,6 +1810,7 @@ if __name__ == "__main__":
                 // ===== AUDIO ANALYSIS =====
                 let audioZoomBoost = 0;
                 let audioMorphBoost = 1.0;
+                let bassEnergy = 0, midEnergy = 0, highEnergy = 0;  // Safe defaults when no audio
                 
                 if (isAudioActive && audioDataArray) {
                     analyser.getByteFrequencyData(audioDataArray);
@@ -1844,12 +1906,11 @@ if __name__ == "__main__":
                         audioZoomBoost = (bassEnergy - 0.2) * 0.8; 
                     }
                     
-                    // Mids/Highs speed up morphing - WITH RATE LIMITING
-                    // Raw target boost (reduced multiplier from 8.0 to 4.0)
-                    let targetMorphBoost = 1.0 + (midEnergy + highEnergy) * 4.0;
+                    // UNCAPPED for wild exploration during intense music
+                    let targetMorphBoost = 1.0 + (midEnergy + highEnergy) * 8.0;
                     
-                    // CAP maximum morph boost to prevent excessive speed
-                    targetMorphBoost = Math.min(targetMorphBoost, 3.0);  // Max 3x speed
+                    // Speed limit: cap at 5x to keep transitions smooth
+                    targetMorphBoost = Math.min(targetMorphBoost, 5.0);
                     
                     // FAST SMOOTH for responsive audio while preventing jitter
                     // 70/30 blend responds in ~3 frames (~50ms) for tight beat sync
@@ -1937,14 +1998,14 @@ if __name__ == "__main__":
                 // Always zoom in
                 accumulatedZoomLog += effectiveZoomRate * smoothedDelta;
                 
-                let brightnessMultiplier = 1.0;  // Always full brightness
+                let brightnessMultiplier = 1.0;  // Full brightness always (zoom reset handles transition via blackness)
                 
                 // Dynamic max iterations - sync with zoom log
                 // Use explicit fallbacks in case config doesn't load properly
                 const iterBaseCount = cfg.iteration?.baseCount || 300;
                 const iterLogMult = cfg.iteration?.logMultiplier || 100;  // Higher multiplier for deep zoom
                 let targetMaxIter = Math.floor(iterBaseCount + iterLogMult * accumulatedZoomLog);
-                if (targetMaxIter < 100) targetMaxIter = 100;   // Floor: minimum 100 iterations for zoomed out view
+                if (targetMaxIter < 500) targetMaxIter = 500;   // Floor: 500 iterations minimum to always show detail
                 if (targetMaxIter > 9000) targetMaxIter = 9000;  // Cap at 9000 (we have 10000 reference points)
                 
                 // SMOOTHED ITERATION COUNT - prevents flickering from discrete jumps
@@ -2051,6 +2112,14 @@ if __name__ == "__main__":
 
                 gl.uniform1i(locMaxIter, gpuMaxIter);
                 
+                // Deferred orbit advance: runs at the START of the frame before texture binding
+                // This prevents the one-frame flash where textures and blend are out of sync
+                if (window._deferredOrbitAdvance) {
+                    window._deferredOrbitAdvance = false;
+                    advanceOrbit();
+                    window.autoMorphBoost = 0;
+                }
+                
                 // Bind Textures - PRIMARY ORBIT
                 if (texRefRe && texRefIm) {
                     gl.activeTexture(gl.TEXTURE0);
@@ -2088,12 +2157,13 @@ if __name__ == "__main__":
                         freezeTimer: 0,            // Seconds remaining in freeze
                         lastBrightness: 0,         // For smoothing
                         morphTime: 0,              // Independent morph time accumulator
-                        observeThreshold: 60,      // Brightness above this = complex
-                        exploreThreshold: 20,      // Brightness below this = boring (raised from 10)
-                        freezeDuration: 20.0,      // How long to freeze when complexity found (seconds)
+                        observeThreshold: 40,      // Brightness above this = complex (lowered for sensitivity)
+                        exploreThreshold: 30,      // Brightness below this = boring (raised for stickiness)
+                        freezeDuration: 45.0,      // How long to freeze when complexity found (long enjoy)
                         smoothedBlend: 0.5,        // Output-smoothed blend to prevent jitter
                         smoothedSpeed: 0.5,        // Smoothed effective speed to prevent velocity jumps
                         modeSwitchCooldown: 0,     // Cooldown timer to prevent rapid mode switching
+                        morphDirection: 1,         // +1 = sweeping up, -1 = sweeping down
                         randomPhase: Math.random() * 628.0,  // Random starting phase for variety
                         secondaryPhase: Math.random() * 314.0,  // Secondary oscillation phase
                     };
@@ -2114,35 +2184,47 @@ if __name__ == "__main__":
                     ms.modeSwitchCooldown -= smoothedDelta;
                 }
                 
-                // FORCE EXPLORE MODE when zooming in from reset (zoom < 0)
-                // This prevents observing during the initial black-to-fractal transition
-                if (accumulatedZoomLog < 0 && ms.mode !== 'explore') {
+                // FORCE EXPLORE MODE when zooming in from reset (zoom < 2)
+                if (accumulatedZoomLog < 2 && ms.mode !== 'explore') {
                     ms.mode = 'explore';
-                    console.log('MORPH: Forcing EXPLORE mode during zoom-in from reset');
+                    console.log('MORPH: Forcing EXPLORE mode during early zoom');
                 }
                 
-                // MODE TRANSITIONS with hysteresis AND cooldown
-                // Can only switch modes when cooldown has elapsed AND zoom >= 0
-                if (ms.modeSwitchCooldown <= 0 && accumulatedZoomLog >= 0) {
-                    if (ms.mode === 'explore') {
-                        // In explore mode: looking for complexity
-                        if (currentBrightness > ms.observeThreshold) {
-                            // Found complexity! Switch to observe mode
-                            console.log(`MORPH: Found complexity (brightness=${currentBrightness.toFixed(1)}) - switching to OBSERVE mode`);
-                            ms.mode = 'observe';
-                            ms.frozenBlend = (Math.sin(ms.morphTime * 0.1 * morphIntensity) + 1.0) * 0.5;
-                            ms.freezeTimer = ms.freezeDuration;
-                            ms.modeSwitchCooldown = 2.0;  // 2 second cooldown before can switch again
+                // ===== AUDIO-DRIVEN MODE SWITCHING =====
+                // Loud music = explore (wild morph exploration)
+                // Quiet music = observe (freeze on current beauty)
+                const totalAudioEnergy = bassEnergy + midEnergy + highEnergy;
+                
+                if (ms.modeSwitchCooldown <= 0 && accumulatedZoomLog >= 2) {
+                    if (ms.mode === 'observe') {
+                        // Switch to EXPLORE when music picks up
+                        if (totalAudioEnergy > 0.8 || (!isAudioActive && currentBrightness > ms.observeThreshold)) {
+                            console.log(`MORPH: Music energy=${totalAudioEnergy.toFixed(2)} - switching to EXPLORE mode`);
+                            ms.mode = 'explore';
+                            ms.modeSwitchCooldown = 3.0;
                         }
-                    } else {
-                        // In observe mode: showing complexity
+                        // Also transition out of observe when freeze timer expires
                         if (ms.freezeTimer > 0) {
                             ms.freezeTimer -= smoothedDelta;
-                        } else if (currentBrightness < ms.exploreThreshold) {
-                            // Lost complexity, switch back to explore
-                            console.log(`MORPH: Lost complexity (brightness=${currentBrightness.toFixed(1)}) - switching to EXPLORE mode`);
+                        } else {
                             ms.mode = 'explore';
-                            ms.modeSwitchCooldown = 2.0;  // 2 second cooldown before can switch again
+                            ms.modeSwitchCooldown = 1.0;
+                        }
+                    } else {
+                        // Switch to OBSERVE when music calms down
+                        if (isAudioActive && totalAudioEnergy < 0.3 && currentBrightness > ms.exploreThreshold) {
+                            console.log(`MORPH: Music calm (energy=${totalAudioEnergy.toFixed(2)}) - switching to OBSERVE mode`);
+                            ms.mode = 'observe';
+                            ms.frozenBlend = ms.smoothedBlend;  // Freeze at current blend value
+                            ms.freezeTimer = ms.freezeDuration;
+                            ms.modeSwitchCooldown = 5.0;
+                        }
+                        // Also observe when no audio and complexity is found
+                        if (!isAudioActive && currentBrightness > ms.observeThreshold) {
+                            ms.mode = 'observe';
+                            ms.frozenBlend = ms.smoothedBlend;
+                            ms.freezeTimer = ms.freezeDuration;
+                            ms.modeSwitchCooldown = 2.0;
                         }
                     }
                 }
@@ -2151,8 +2233,9 @@ if __name__ == "__main__":
                 const baseMorphSpeed = 0.1;
                 let targetMorphSpeed;
                 if (ms.mode === 'explore') {
-                    // Explore: Slow morph to reliably catch complexity (1.5x for detection sync)
-                    targetMorphSpeed = baseMorphSpeed * 1.5;
+                    // Explore: Fast morph — cycle through many states to find beauty
+                    // Audio boost will multiply this further for wild exploration
+                    targetMorphSpeed = baseMorphSpeed * 3.0;
                 } else {
                     // Observe: FREEZE morph completely to enjoy the complexity
                     targetMorphSpeed = 0.0;
@@ -2174,32 +2257,48 @@ if __name__ == "__main__":
                     console.log("MORPH: Time wrapped to prevent precision loss");
                 }
                 
-                // Calculate base morph blend
+                // Calculate base morph blend — FORWARD SWEEP with orbit cycling
+                // Blend goes 0→1 continuously. When it reaches 1.0, we advance
+                // to the next orbit pair, giving INFINITE variety from all orbits.
                 let morphBlend;
                 if (ms.mode === 'observe' && ms.freezeTimer > 0) {
                     // FROZEN: use saved blend value with very subtle drift
                     const driftAmount = (ms.freezeDuration - ms.freezeTimer) * 0.01;
                     morphBlend = ms.frozenBlend + Math.sin(driftAmount) * 0.02;
                 } else {
-                    // COMPLEX OSCILLATION using multiple frequencies for variety
-                    // Primary wave (slow) + secondary wave (faster) + random phase offset
-                    const t = ms.morphTime + ms.randomPhase;
-                    const primary = Math.sin(t * baseMorphSpeed) * 0.4;           // Main slow wave
-                    const secondary = Math.sin(t * baseMorphSpeed * 2.7 + ms.secondaryPhase) * 0.3;  // Faster wave
-                    const tertiary = Math.sin(t * baseMorphSpeed * 0.37) * 0.2;   // Very slow modulation
-                    morphBlend = 0.5 + primary + secondary + tertiary;
-                    morphBlend = Math.max(0.0, Math.min(1.0, morphBlend));  // Clamp to 0-1
+                    // Forward sweep: morphTime drives blend from 0→1
+                    // Speed is controlled by morphSpeed + audio boost
+                    // sweepRate controls how many seconds for a full 0→1 transition
+                    const sweepRate = 0.03;  // ~33 seconds per orbit transition at base speed
+                    let rawBlend = (ms.morphTime * sweepRate) % 1.0;
+                    
+                    // LINEAR blend — constant rate of structural change
+                    // (smoothstep caused a 'snap' feeling because it accelerates from rest)
+                    morphBlend = rawBlend;
+                    
+                    // Only advance when the VISUAL blend (smoothstep) is very close to 1.0
+                    // This guarantees we're fully showing the secondary orbit before swapping
+                    if (morphBlend > 0.99 && allOrbits.length >= 2) {
+                        // DEFER the orbit advance to start of NEXT frame
+                        // This prevents the one-frame flash where textures and blend are out of sync
+                        // (textures get bound before this code, so swapping here would show stale textures)
+                        window._deferredOrbitAdvance = true;
+                        ms.morphTime = 0;  // Reset morph time for clean sweep
+                        morphBlend = 1.0;  // Keep showing current secondary until swap happens next frame
+                        console.log(`MORPH: Queued orbit advance for next frame`);
+                    }
                 }
                 
                 // Add auto-boost from black screen detection (existing system)
                 const autoBoost = window.autoMorphBoost || 0;
                 morphBlend = Math.min(1.0, Math.max(0.0, morphBlend + autoBoost));
                 
-                // FINAL OUTPUT SMOOTHING - prevents ALL jitter by smoothing the actual value sent to shader
-                // 90/10 blend provides responsive but smooth transitions without visible jumps
-                ms.smoothedBlend = ms.smoothedBlend * 0.9 + morphBlend * 0.1;
+                // Send blend directly to shader — smoothstep easing handles smooth transitions
+                // (removed 90/10 output smoother: it caused lag at orbit swap boundaries,
+                // creating a visible flash when smoothedBlend was at 0.95 but textures had already swapped)
+                ms.smoothedBlend = morphBlend;  // Keep tracking for observe freeze reference
                 
-                gl.uniform1f(locMorphBlend, ms.smoothedBlend);
+                gl.uniform1f(locMorphBlend, morphBlend);
                 
                 // Populate ripple uniforms with top 4 ripples (sorted by intensity)
                 const rippleMultiplier = window.fractalSettings?.rippleIntensity ?? 1.0;
@@ -2285,18 +2384,23 @@ if __name__ == "__main__":
                         window.blackScreenTotalTime = performance.now();
                         window.autoMorphBoost = window.autoMorphBoost || 0;
                         console.log("BLACK SCREEN: Timer started, will boost morph");
-                    } else if (performance.now() - window.blackScreenStartTime > 500) {
-                        // Black for more than 0.5 seconds - increase morph to find complexity
-                        window.autoMorphBoost = (window.autoMorphBoost || 0) + 0.02;
-                        if (window.autoMorphBoost > 1.0) window.autoMorphBoost = 1.0;
-                        console.log(`BLACK SCREEN: Boosting morph blend to ${window.autoMorphBoost.toFixed(2)}`);
-                        window.blackScreenStartTime = performance.now();  // Reset timer to keep boosting
+                    } else if (performance.now() - window.blackScreenStartTime > 1000) {
+                        // Black for more than 1 second - boost morph speed to quickly cycle
+                        // Instead of force-swapping orbits (which causes jarring flashes),
+                        // we accelerate the morph toward blend=1.0 where the smooth advance
+                        // mechanism will handle the swap gracefully.
+                        const morphSpeedBoost = 10.0;  // 10x morph speed during blackness
+                        if (window.morphState) {
+                            window.morphState.morphTime += 0.5;  // Push blend forward rapidly
+                        }
+                        console.log(`BLACK SCREEN: Accelerating morph to find complexity`);
+                        window.blackScreenStartTime = performance.now();  // Reset timer
                         
-                        // FALLBACK: If morph boosting has been active for 5+ seconds, reset zoom
+                        // FALLBACK: If accelerated morphing hasn't found complexity in 20s, reset zoom
                         const totalBlackTime = (performance.now() - window.blackScreenTotalTime) / 1000;
-                        if (totalBlackTime > 5) {
-                            console.log("=== FALLBACK: Morph failed after 5 seconds - ZOOM RESET ===");
-                            accumulatedZoomLog = -5;  // Reset to blackness for seamless transition
+                        if (totalBlackTime > 20) {
+                            console.log("=== FALLBACK: All orbits dark at this zoom - ZOOM RESET ===");
+                            accumulatedZoomLog = -5;  // Reset to blackness for dramatic zoom-in
                             startupTime = performance.now();  // Reset startup delay
                             window.autoMorphBoost = 0;
                             window.blackScreenStartTime = 0;

@@ -1,12 +1,12 @@
 {
   "zoom": {
-    "rate": 0.05,
-    "maxLog": 12
+    "rate": 0.04,
+    "maxLog": 35
   },
   "iteration": {
-    "baseCount": 300,
-    "maxCount": 1000,
-    "logMultiplier": 60
+    "baseCount": 800,
+    "maxCount": 2000,
+    "logMultiplier": 80
   },
   "animation": {
     "morphRate": 0.5,

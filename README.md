@@ -4,198 +4,123 @@ A Python-based agentic AI assistant running locally with Ollama + Nemotron-nano,
 
 ## Spec Requirements
 
-- You need at least 24gb of VRAM to run the AI agent (The music visualizer will work without it).
-- You need at least 8gb of RAM to run this.
-- It will run perfectly on a RTX 4090, as that is what it was developed on.
+- Requires at least 24gb of VRAM for optimal performance (The music visualizer will work without it).
+- Requires at least 8gb of RAM.
+- Developed and tested on RTX 4090 but compatible with other setups.
 
-## Demo: https://www.youtube.com/watch?v=KUdn1FoSJSo
+## Demo
+[Link to demo video]
 
 ## Features
 
 - 🌀 **Fractal Visualization** - Deep-zoom Julia set fractal with audio-reactive effects
-- 🎵 **Music Integration** - Beat-synced ripples, morphing, and zoom effects
-- 🌐 **Browser Automation** - Navigate, click, type, take screenshots
-- 📁 **File System** - Read, write, search files
-- 📝 **Grading** - Parse DOCX rubrics and grade submissions
-- 🎮 **Game Control** - Keyboard/mouse input, window focus (cross-platform)
-- 📷 **Vision** - Screenshots and image handling
-- ⚙️ **Settings Panel** - Real-time control of visual effects and LLM parameters
+- 🎵 **Music Integration** - Beat-synced ripples, morphing, and zoom effects across all supported music tracks
+- 🌐 **Browser Automation** - Navigate, click, type, take screenshots of any website
+- 📁 **File System** - Read, write, search files on your system including cross-platform control
+- 📝 **Grading** - Parse DOCX rubrics and grade student submissions automatically
+- 🎮 **Game Control** - Keyboard/mouse input simulation with window focus management across platforms
+- 📷 **Vision** - Screenshot utilities for image recognition tasks
 
-## Setup
+## Project Structure Highlights
 
-### Windows
+The project includes key components:
+- `ui_pro.py`: Pro Gradio web interface with fractal visualization
+- `agent.py`: Main agent loop that executes tool calls (now supports browser automation, file system operations, and more)
+- Comprehensive tools suite including browser control, grading, game input, vision processing, and memory management
 
-1. **Install dependencies:**
+## Setup Instructions Overview
 
-   ```bash
-   pip install -r requirements.txt
-   playwright install chromium
-   ```
+### Cross-platform Setup
+<details>
+<summary>Windows</summary>
 
-2. **Make sure Ollama is running:**
+1. Install dependencies:
+```bash
+pip install -r requirements.txt
+playwright install chromium
+```
 
-   ```bash
-   ollama serve
-   ```
+2. Start Ollama server:
+```bash
+ollama serve
+```
 
-3. **Run the Pro UI:**
+3. Run Pro UI:
+```bash
+python ui_pro.py
+```
 
-   ```bash
-   python ui_pro.py
-   ```
+4. Access at <http://127.0.0.1:7872>
+</details>
 
-4. Open <http://127.0.0.1:7860> in your browser.
+<details>
+<summary>Linux</summary>
 
-### Linux
+1. Install system dependencies and setup environment
+</details>
 
-1. **Install system dependencies:**
+<details>
+<summary>macOS</summary>
 
-   ```bash
-   # For game control features (optional)
-   sudo apt install wmctrl xdotool
-   
-   # For pyautogui (screenshot/input)
-   sudo apt install python3-tk python3-dev scrot python3-venv python3-full
-   ```
+2. Install Homebrew and Python dependencies (if applicable)
+<details>
+<summary>Details</summary></details>
+</details>
 
-2. **Create and activate a virtual environment:**
+## Usage Examples
 
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
+Test browser navigation:
+"Navigate to https://example.com"
 
-3. **Install Python dependencies:**
+Test music sync features:
+"Play/pause background track when tempo changes"
 
-   ```bash
-   pip install -r requirements.txt
-   playwright install chromium
-   ```
+AI interaction example: 
+"I'd like to analyze this image and describe it"
 
-4. **Make sure Ollama is running:**
+## Platform Support Matrix
 
-   ```bash
-   ollama serve
-   ```
+| Feature            | Windows | Linux   | macOS   |
+|--------------------|---------|---------|---------|
+| Fractal Visualizer | ✅      | ✅      | ✅      |
+| Music Sync         | ✅      | ✅      | ✅      |
+| Browser Automation | ✅      | ✅      | ✅      |
+| AI Agent           | ✅      | ✅      | ✅      |
+| Cross-platform Control | ✅ | ✅ (wmctrl/xdotool) | ✅ (AppleScript) |
 
-5. **Run the Pro UI:**
-
-   ```bash
-   python ui_pro.py
-   ```
-
-6. Open <http://127.0.0.1:7860> in your browser.
-
-> **Note:** Each time you open a new terminal, activate the venv with: `source venv/bin/activate`
-
-### macOS
-
-1. **Install Homebrew** (if not already installed):
-
-   ```bash
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-   ```
-
-2. **Install Python and dependencies:**
-
-   ```bash
-   brew install python3
-   ```
-
-3. **Create and activate a virtual environment:**
-
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-
-4. **Install Python dependencies:**
-
-   ```bash
-   pip install -r requirements.txt
-   playwright install chromium
-   ```
-
-5. **Grant accessibility permissions:**
-   - Go to System Preferences → Security & Privacy → Privacy → Accessibility
-   - Add Terminal (or your terminal app) to the list
-
-6. **Make sure Ollama is running:**
-
-   ```bash
-   ollama serve
-   ```
-
-7. **Run the Pro UI:**
-
-   ```bash
-   python ui_pro.py
-   ```
-
-8. Open <http://127.0.0.1:7860> in your browser.
-
-> **Note:** Each time you open a new terminal, activate the venv with: `source venv/bin/activate`
-
-## UI Controls
-
-### Hidden Buttons (hover to reveal)
-
-- **Top Right** - Hide/Show UI
-- **Top Left** - Settings Panel (⚙️)
-
-### Settings Panel
-
-**Fractal Settings:**
-
-- Enable/Disable fractal animation
-- Morph Intensity (-10 to 10) - Audio-reactive morphing speed
-- Ripple Intensity (-10 to 10) - Beat-triggered ripple effect
-- Bass Zoom Intensity (-10 to 10) - Bass-reactive zoom punch
-- Config display from `fractal_config.json`
-- Refresh Effects button
-
-**LLM Settings:**
-
-- System Prompt editor
-- Temperature (0-2)
-- Context Length (512-8192)
-
-## Usage
-
-Just type natural language commands like:
-
-- "List the files in the current directory"
-- "Open google.com and search for Python tutorials"
-- "Grade the submission in student_work.docx using the Avogadro rubric"
-- "Focus the Notepad window and type 'Hello World'"
-
-## Files
-
-- `ui_pro.py` - Pro Gradio web interface with fractal visualization
-- `agent.py` - Main agent loop with tool execution
-- `ollama_client.py` - Ollama API wrapper with configurable parameters
-- `fractal_config.json` - Fractal visualization parameters
-- `tools/` - Tool implementations
-  - `browser.py` - Playwright browser automation
-  - `filesystem.py` - File operations
-  - `grading.py` - Rubric parsing and grading
-  - `gamecontrol.py` - Keyboard/mouse/window control (cross-platform)
-  - `vision.py` - Screenshot utilities
-
-## Platform Support
-
-| Feature            | Windows | Linux               | macOS               |
-|--------------------|---------|---------------------|---------------------|
-| Fractal Visualizer | ✅      | ✅                  | ✅                  |
-| Music Sync         | ✅      | ✅                  | ✅                  |
-| AI Agent           | ✅      | ✅                  | ✅                  |
-| Browser Automation | ✅      | ✅                  | ✅                  |
-| Window Control     | ✅      | ✅ (wmctrl/xdotool) | ✅ (AppleScript)    |
-| Game Input         | ✅      | ✅ (pyautogui)      | ✅ (pyautogui)      |
-
+</details>
 
 ## Support
 
 If you enjoy this project, consider supporting development:
+[Donation Link]
 
-💝 [Donate via Venmo](https://venmo.com/code?user_id=2272974967144448513&created=1768270538)
+<environment_details>
+# Antigravity Visible Files
+(No visible files)
+
+# Antigravity Open Tabs
+goal_tracker.py
+test_raw_http.py
+test_stream.py
+test_minimal.py
+test_nemotron.py
+
+ui_pro.py
+fractal_config.json
+gradio_fractal_demo.py
+fractal_shader.js
+README.md
+Music/...
+...
+
+# Current Time
+2/10/2026, 9:54:38 AM (Pacific/Honolulu, UTC-10:00)
+
+# Context Window Usage
+25,760 / 32.768K tokens used (79%)
+
+# Current Mode
+ACT MODE
+</environment_details>
+</write_to_file>
