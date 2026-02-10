@@ -8,8 +8,12 @@ A Python-based agentic AI assistant running locally with Ollama + Nemotron-nano,
 - Requires at least 8gb of RAM.
 - Developed and tested on RTX 4090 but compatible with other setups.
 
+<<<<<<< HEAD
 ## Demo
 [Link to demo video]
+=======
+## Demo: [https://www.youtube.com/watch?v=KUdn1FoSJSo](https://youtu.be/09YM7YPSbWw)
+>>>>>>> 32139ff4ee3603539f11c2e2d040de11552ed209
 
 ## Features
 
