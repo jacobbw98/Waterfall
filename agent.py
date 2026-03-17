@@ -1,5 +1,6 @@
 """
 Agent - Main agentic loop with tool execution.
+Now with short-term memory (RLM), long-term memory (MemOS), and reasoning (Poetiq ARC).
 """
 import json
 import re
@@ -11,12 +12,41 @@ from tools.grading import get_grading
 from tools.gamecontrol import get_gamecontrol
 from tools.vision import get_vision
 
+# Memory subsystem (graceful degradation if deps missing)
+try:
+    from memory.short_term import ShortTermMemory
+    SHORT_TERM_AVAILABLE = True
+except ImportError:
+    SHORT_TERM_AVAILABLE = False
+
+try:
+    from memory.long_term import LongTermMemory
+    LONG_TERM_AVAILABLE = True
+except ImportError:
+    LONG_TERM_AVAILABLE = False
+
+# Reasoning subsystem
+try:
+    from reasoning.arc_solver import ARCSolver
+    ARC_AVAILABLE = True
+except ImportError:
+    ARC_AVAILABLE = False
+
 
 class Agent:
     """Agentic AI with tool-calling capabilities."""
     
     def __init__(self, model: str = "nemotron-3-nano:latest"):
         self.client = OllamaClient(model)
+        self.model = model
+        
+        # Initialize memory subsystems
+        self.short_term = ShortTermMemory(model) if SHORT_TERM_AVAILABLE else None
+        self.long_term = LongTermMemory() if LONG_TERM_AVAILABLE else None
+        
+        # Initialize reasoning subsystem
+        self.arc_solver = ARCSolver(model) if ARC_AVAILABLE else None
+        
         self.tools = self._register_tools()
         self.max_iterations = 10
         self.verbose = True
@@ -67,6 +97,31 @@ class Agent:
             # Human interaction tools
             "wait_for_human": lambda reason="": f"HUMAN_TAKEOVER_REQUESTED: {reason}",
         }
+        
+        # --- Memory tools (added dynamically based on availability) ---
+        if self.short_term:
+            tools.update({
+                "memory_store": lambda key, content: self.short_term.store(key, content),
+                "memory_search": lambda query: self.short_term.search(query),
+                "memory_peek": lambda key, start=0, end=1000: self.short_term.peek(key, int(start), int(end)),
+                "memory_list": lambda: self.short_term.list_keys(),
+                "memory_summarize": lambda query="Summarize everything.": self.short_term.summarize(query),
+            })
+        
+        if self.long_term:
+            tools.update({
+                "memory_save": lambda content: self.long_term.store(content),
+                "memory_recall": lambda query: self.long_term.recall(query),
+                "memory_status": lambda: self.long_term.status(),
+            })
+        
+        # --- Reasoning tools ---
+        if self.arc_solver:
+            tools.update({
+                "arc_solve": lambda task: self.arc_solver.solve(task),
+            })
+        
+        return tools
     
     def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
         """Execute a tool and return the result, ignoring unexpected arguments."""
@@ -180,8 +235,20 @@ class Agent:
         self.client.reset_conversation()
         yield {"type": "start", "task": task}
         
+        # --- Recall long-term memories relevant to this task ---
+        memory_context = ""
+        if self.long_term and self.long_term.available:
+            try:
+                recalled = self.long_term.recall(task)
+                if recalled and "No relevant" not in recalled and "not reachable" not in recalled:
+                    memory_context = f"\n\nRELEVANT MEMORIES FROM PREVIOUS SESSIONS:\n{recalled}"
+                    yield {"type": "thought", "content": f"Recalled long-term memories: {recalled[:200]}..."}
+            except Exception as e:
+                if self.verbose:
+                    print(f"[DEBUG] Long-term recall failed: {e}")
+        
         # Initial model prompt - direct action, not planning
-        current_prompt = f"USER GOAL: {task}\n\nStart now. Call the first tool you need, or answer directly if no tools are required."
+        current_prompt = f"USER GOAL: {task}{memory_context}\n\nStart now. Call the first tool you need, or answer directly if no tools are required."
         iteration = 0
         last_tool_result = ""
         last_tool_name = ""
@@ -319,6 +386,13 @@ class Agent:
             last_tool_name = tool_name
             yield {"type": "tool_result", "tool": tool_name, "result": result}
             
+            # 5b. AUTO-STORE in short-term memory
+            if self.short_term and tool_name not in ("memory_store", "memory_search", "memory_peek", "memory_list", "memory_summarize"):
+                try:
+                    self.short_term.store(f"step_{iteration}_{tool_name}", result[:5000])
+                except Exception:
+                    pass  # Never let memory storage break the main loop
+            
             # 6. REFLECT: Feed result back and continue loop with a progress check
             self.client.add_tool_result(tool_name, result)
             
@@ -329,6 +403,14 @@ class Agent:
                 current_prompt = tracker.get_reflection_prompt(result)
             
             iteration += 1
+        
+        # --- Persist task summary to long-term memory ---
+        if self.long_term and self.long_term.available and last_tool_result:
+            try:
+                summary = f"Task: {task}\nSteps taken: {iteration}\nFinal tool: {last_tool_name}\nResult preview: {last_tool_result[:500]}"
+                self.long_term.store(summary)
+            except Exception:
+                pass  # Never let memory persistence break completion
         
         if iteration >= self.max_iterations:
             yield {"type": "max_iterations", "message": "Reached maximum iterations"}

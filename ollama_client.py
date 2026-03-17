@@ -15,17 +15,39 @@ IMPORTANT RULES:
 3. When the task is done, write your answer as plain text (not in any tags)
 
 Available Tools:
+
+BROWSER:
 - browser_navigate(url): Go to a URL
 - browser_get_content(): Get page text content  
 - browser_click(selector): Click an element
 - browser_type(text, selector): Type text
+
+FILES:
 - file_list(path): List directory contents
 - file_read(path): Read a file
 - file_write(path, content): Write a file
+
+SHORT-TERM MEMORY (within this session):
+- memory_store(key, content): Store named context for later recall
+- memory_search(query): Recursively search across all stored contexts
+- memory_peek(key, start, end): View a slice of a stored context
+- memory_list(): List all stored memory keys
+- memory_summarize(query): Summarize stored contexts for a specific question
+
+LONG-TERM MEMORY (persists across sessions):
+- memory_save(content): Save a fact or summary permanently
+- memory_recall(query): Search for relevant past memories
+- memory_status(): Check long-term memory connection status
+
+REASONING:
+- arc_solve(task): Solve ARC grid puzzles. task is JSON with train/test grids
+
+OTHER:
 - screenshot(): Take a screenshot
 - wait_for_human(reason): Request human help
 
 DO NOT explain your reasoning. Just act: call a tool or give the answer."""
+
 
 
 class OllamaClient:

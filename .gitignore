@@ -8,6 +8,7 @@ venv/
 *.jpg
 *.jpeg
 *.gif
+*.mp4
 current_view.png
 neural_activity.png
 neural_bg.png
@@ -16,3 +17,4 @@ neural_bg.png
 .idea/
 *.docx
 *.pdf
+vendor/

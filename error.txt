@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "<string>", line 3, in <module>
+  File "C:\Users\Jacob\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\litellm\__init__.py", line 978, in <module>
+    from litellm.litellm_core_utils.litellm_logging import Logging, modify_integration
+  File "C:\Users\Jacob\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\litellm\litellm_core_utils\litellm_logging.py", line 56, in <module>
+    from litellm.integrations.arize.arize import ArizeLogger
+  File "C:\Users\Jacob\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\litellm\integrations\arize\__init__.py", line 51, in <module>
+    SupportedPromptIntegrations.ARIZE_PHOENIX.value: prompt_initializer,
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\Lib\enum.py", line 786, in __getattr__
+    raise AttributeError(name) from None
+AttributeError: ARIZE_PHOENIX
